@@ -1,0 +1,25 @@
+# Local secrets / env — never commit
+.env
+.env.*
+!.env.example
+.hermes/
+*.pem
+*.key
+*.p12
+audit/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Databases & runtime state
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs & generated output
+logs/
+*.jsonl
+state/

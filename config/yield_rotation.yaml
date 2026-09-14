@@ -1,0 +1,33 @@
+ACCOUNT_TYPE: UNIFIED            # Bybit only supports UNIFIED for Earn
+ALERT_TELEGRAM_CHAT_ID: '5860907422'
+COIN_WHITELIST: [USDT]
+CYCLE_INTERVAL_MINUTES: 10       # systemd timer cadence
+DRY_RUN: true                    # true = log only; false = execute trades (ONLY on explicit user go)
+ENTRY_APR: 0.001
+EXIT_APR: 0.0
+LOG_DIR: /opt/hermes/logs/yield_rotation
+MAX_PER_PRODUCT_USD: 5
+MAX_REDEMPTION_ETA_HOURS: 2
+MIN_APR_EDGE: 0.009
+MIN_MOVE_USD: 1
+PROMPT_VERSION: v5
+REQUESTED_MODEL: hermes-cheap
+REQUESTED_REASONING: medium
+RESERVE_USD: 0
+RESOLVED_MODEL: google/gemini-2.5-flash
+
+# Simulated balance used ONLY while DRY_RUN: true. If set while DRY_RUN: false
+# the cycle refuses to start (CRITICAL) — this is the safety rail against
+# pretending to have fake capital while moving real funds.
+SIMULATED_IDLE_BALANCE: 100
+
+# ---- The TWO real staleness parameters (both read by run_yield_cycle.py) ----
+# MAX_SCAN_AGE_SECONDS: age of the LIVE product scan. Measured as elapsed
+#   wall-clock seconds between when /v5/earn/product returned and when the
+#   plan executes. Seconds. This is the true "live freshness" guard.
+MAX_SCAN_AGE_SECONDS: 900
+
+# MAX_APR_HISTORY_GAP_HOURS: age of the APR-history data. Measured as the gap
+#   between "now" and the latest APR-history data point (Bybit refreshes this
+#   ~hourly). Hours. Guard against genuinely dead history data.
+MAX_APR_HISTORY_GAP_HOURS: 4
