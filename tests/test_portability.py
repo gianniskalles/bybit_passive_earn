@@ -17,7 +17,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _IMPORT_PROBE = r"""
-import importlib, json, os, sys
+import importlib, json, os, site, sys
+# The interpreter's own files (stdlib, site-packages) may legitimately live
+# under /opt — e.g. /opt/hostedtoolcache on GitHub runners. Only the
+# project's own behaviour is under test.
+own = tuple(os.path.realpath(p) for p in
+            {sys.prefix, sys.base_prefix, sys.exec_prefix, *site.getsitepackages()})
 touched = []
 def hook(event, args):
     if event in ("open", "os.mkdir", "os.listdir", "os.scandir", "os.remove",
@@ -25,14 +30,18 @@ def hook(event, args):
         p = args[0]
         if isinstance(p, bytes):
             p = p.decode(errors="replace")
-        if isinstance(p, (str, os.PathLike)) and str(p).startswith("/opt"):
-            touched.append([event, str(p)])
+        if not isinstance(p, (str, os.PathLike)):
+            return
+        p = str(p)
+        if p.startswith("/opt") and not os.path.realpath(p).startswith(own):
+            touched.append([event, p])
 sys.addaudithook(hook)
 env_before = dict(os.environ)
+path_before = list(sys.path)
 importlib.import_module(sys.argv[1])
 print(json.dumps({
     "touched": touched,
-    "opt_on_sys_path": [p for p in sys.path if str(p).startswith("/opt")],
+    "opt_on_sys_path": [p for p in sys.path if p not in path_before and str(p).startswith("/opt")],
     "env_added": sorted(set(os.environ) - set(env_before)),
 }))
 """
