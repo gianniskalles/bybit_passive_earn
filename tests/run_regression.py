@@ -23,12 +23,8 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 from tests.fixtures import ALL_FIXTURES, get_fixture  # noqa: E402
 import settings  # noqa: E402
+from run_yield_cycle import build_agent_command, load_config  # noqa: E402
 
-PROMPT_PATH_DEFAULT = settings.ROOT / "prompt_v5.md"
-# hermes CLI binary path. /usr/local/bin/hermes is the gateway CLI
-# (hermes george, hermes seo). The agent is at /opt/hermes/.venv/bin/hermes
-# on the VPS (override with YIELD_HERMES_BIN).
-HERMES_BIN = str(settings.hermes_bin())
 DEFAULT_RUNS = 5
 DEFAULT_TIMEOUT = 180  # seconds, per the spec
 
@@ -140,13 +136,13 @@ def compose_prompt(prompt_template: str, fixture: dict) -> str:
     )
 
 
-def call_hermes(prompt: str, timeout: int) -> tuple[int, str, str, float]:
-    """Call hermes chat with the prompt, return (exit, stdout, stderr, elapsed)."""
+def call_hermes(prompt: str, cfg: dict, timeout: int) -> tuple[int, str, str, float]:
+    """Call hermes chat with EXACTLY the production command line
+    (run_yield_cycle.build_agent_command). Returns (exit, stdout, stderr, elapsed)."""
     start = time.time()
     try:
         proc = subprocess.run(
-            [HERMES_BIN, "chat", "--query-file", "/dev/stdin", "-Q",
-             "--toolsets=", "--reasoning", "medium"],
+            build_agent_command(cfg),
             input=prompt,
             capture_output=True,
             text=True,
@@ -210,13 +206,13 @@ def validate(parsed: dict, expected: dict) -> tuple[bool, list]:
     return (len(fails) == 0, fails)
 
 
-def run_fixture(fixture: dict, prompt: str, runs: int, timeout: int) -> dict:
+def run_fixture(fixture: dict, prompt: str, cfg: dict, runs: int, timeout: int) -> dict:
     """Run a single fixture N times, return pass/fail summary."""
     full_prompt = compose_prompt(prompt, fixture)
     passes = 0
     failures = []
     for run_idx in range(1, runs + 1):
-        exit_code, stdout, stderr, elapsed = call_hermes(full_prompt, timeout)
+        exit_code, stdout, stderr, elapsed = call_hermes(full_prompt, cfg, timeout)
         parsed = extract_json(stdout)
         if parsed is None:
             failures.append({"run": run_idx, "elapsed": elapsed,
@@ -243,12 +239,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=DEFAULT_RUNS)
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
-    ap.add_argument("--prompt", type=Path, default=PROMPT_PATH_DEFAULT)
+    ap.add_argument("--prompt", type=Path, default=None,
+                    help="default: prompt_<PROMPT_VERSION>.md from the production config")
     ap.add_argument("--fixtures", default=None,
                     help="comma-separated fixture names; default = all")
     ap.add_argument("--out", type=Path,
                     default=Path("/tmp/smoke/regression_results.json"))
     args = ap.parse_args()
+
+    # Model, reasoning and flags come from the production config (T1.10).
+    cfg = load_config(settings.config_file())
+    if args.prompt is None:
+        args.prompt = settings.ROOT / f"prompt_{cfg['PROMPT_VERSION']}.md"
 
     if not args.prompt.exists():
         print(f"FATAL: prompt file not found: {args.prompt}", file=sys.stderr)
@@ -270,7 +272,7 @@ def main() -> int:
     total_runs = 0
     for fx in fixtures:
         print(f"=== {fx['name']} ===", file=sys.stderr)
-        r = run_fixture(fx, prompt, args.runs, args.timeout)
+        r = run_fixture(fx, prompt, cfg, args.runs, args.timeout)
         status = "PASS" if r["passes"] == r["total"] else "FAIL"
         print(f"  {status}: {r['passes']}/{r['total']}", file=sys.stderr)
         if r["failures"]:

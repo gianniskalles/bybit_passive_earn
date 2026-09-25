@@ -50,7 +50,7 @@ The runner is the **verifier + filter** that wraps the LLM agent:
                 ┌─────────────────────────────────────┐
                 │   Decision record (stdout + log)   │
                 │   - filtered_by_wrapper (audit)    │
-                │   - prompt_version: v4             │
+                │   - prompt_version / prompt_sha256 │
                 │   - balance_source: real|simulated │
                 │   - model_requested / actual       │
                 └─────────────────────────────────────┘
@@ -90,19 +90,28 @@ Key fields:
 
 ## Risk state
 
-The wrapper verifies the HMAC-signed risk state file at
-`/opt/hermes/state/risk_state.json` on every cycle. If missing,
-unreadable, or HMAC fails, risk_state is forced to
-`NO_NEW_POSITIONS` and the agent is told no new positions are
-allowed.
+`risk_state.json` (default `/opt/hermes/state/risk_state.json`) is signed
+with HMAC (`signing.py`) and carries `profile, state, ts, reason, source,
+sig`. `risk_state.verify()` returns a structured result (`code`,
+`signature_valid`, `fresh`). The wrapper derives the **effective** state:
 
-To set a manual risk state for testing:
+| Verified record | Effective state |
+|---|---|
+| valid + fresh | as signed |
+| valid, stale | NORMAL→NO_NEW_POSITIONS, NO_NEW_POSITIONS→same, UNWIND→UNWIND |
+| missing / unreadable / bad signature / malformed | NO_NEW_POSITIONS |
+
+The cycle never stops on a bad risk state. `NO_NEW_POSITIONS`: every STAKE
+is dropped by the wrapper (`RISK_GATE_DROPPED_STAKE`), redemptions still
+run. `UNWIND`: the LLM is not called; the wrapper redeems every position.
+
+Operator override (writes `source: operator`, which the heartbeat never
+touches):
 
 ```bash
-HMAC=$(sudo -u hermes grep HERMES_RISK_HMAC_KEY /opt/hermes/.env | cut -d= -f2)
-sudo -u hermes env -i HERMES_RISK_HMAC_KEY="$HMAC" \
-  /opt/hermes/.venv/bin/python /opt/hermes/tools/risk_state.py \
-  write /opt/hermes/state/risk_state.json NORMAL "manual override"
+sudo -u hermes /opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/risk_state.py \
+  write UNWIND "manual stop"
+sudo -u hermes /opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/risk_state.py verify
 ```
 
 ## CLI flags
@@ -118,7 +127,6 @@ All flags are explicit (no env vars, no global config):
                    /opt/hermes/yield_rotation/config/yield_rotation.yaml)
 --model NAME       Hermes model (default: hermes-cheap)
 --reasoning LEVEL  Reasoning level (default: medium)
---prompt-version V Prompt version (default: v4)
 ```
 
 ## Decision record schema
@@ -159,7 +167,7 @@ All flags are explicit (no env vars, no global config):
   "filtered_by_wrapper": [
     { "product_id": "2", "reason": "OUTSIDE_WHITELIST: coin=BTC" }
   ],
-  "prompt_version": "v4",
+  "prompt_version": "v6",
   "model_requested": "hermes-cheap",
   "snapshot_meta": { "ts": ..., "account_type": "UNIFIED", ... }
 }
@@ -180,6 +188,6 @@ All flags are explicit (no env vars, no global config):
 - `run_yield_cycle.py` — this file
 - `executor.py` — dry-run vs live execution wrapper
 - `bybit_earn_tool.py` — Bybit Earn API client (CLI)
-- `prompt_v4.md` — locked agent prompt (v4)
+- `prompt_v6.md` — agent prompt (selected by `PROMPT_VERSION`; old versions in `archive/`)
 - `config/yield_rotation.yaml` — strategy config
 - `tests/fixtures.py` + `tests/run_regression.py` — 40-case regression

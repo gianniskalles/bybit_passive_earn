@@ -3,9 +3,10 @@
 
 Covers the two scenarios the user explicitly wants proven, plus the LOG_DIR
 rules:
-  1. test_bootstrap_no_logs_writes_normal
-       no cycle log at all  -> heartbeat writes NORMAL (previously the point
-       where the old version froze / deadlocked on missing LOG_DIR).
+  1. test_bootstrap_no_logs_writes_no_new_positions
+       no cycle log at all  -> heartbeat writes NO_NEW_POSITIONS with
+       source=heartbeat_bootstrap; it is promoted to NORMAL only after a
+       verified clean cycle (test_bootstrap_promotes_after_clean_cycle).
   2. test_log_dir_missing_errors
        LOG_DIR misconfigured / directory missing -> heartbeat FAILS (exit 3)
        with an alert; it is NOT silently treated as bootstrap.
@@ -22,7 +23,6 @@ Run with `pytest` from the repo root; tests/conftest.py isolates every path
 into tmp_path and blocks network access.
 """
 
-import importlib
 import json
 import time
 from datetime import datetime, timezone
@@ -32,6 +32,7 @@ from pathlib import Path
 from signing import sign, verify
 
 import heartbeat
+import risk_state
 
 KEY = "test-secret-key-123"
 
@@ -45,15 +46,18 @@ def _setenv(monkeypatch, log_dir: Path, state_file: Path, skip_config_dcheck: st
 
 
 def _run() -> int:
-    importlib.reload(heartbeat)
     return heartbeat.main()
+
+
+def _signed(state: str, ts: int, reason: str, source: str = risk_state.SOURCE_RENEW) -> dict:
+    return risk_state.make_record(KEY, state, reason, source, ts_ms=ts)
 
 
 def _valid(rs: dict) -> bool:
     return verify(KEY, {k: v for k, v in rs.items() if k != "sig"}, rs.get("sig", ""))
 
 
-def test_bootstrap_no_logs_writes_normal(tmp_path, monkeypatch):
+def test_bootstrap_no_logs_writes_no_new_positions(tmp_path, monkeypatch):
     """Bootstrap: no cycle has ever run (log dir exists, no *.jsonl) -> NO_NEW_POSITIONS (fail-closed)."""
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
@@ -65,6 +69,7 @@ def test_bootstrap_no_logs_writes_normal(tmp_path, monkeypatch):
     rs = json.loads(state.read_text())
     assert rs["state"] == "NO_NEW_POSITIONS", f"expected NO_NEW_POSITIONS (fail-closed), got {rs['state']}"
     assert _valid(rs), "HMAC must verify"
+    assert rs["source"] == "heartbeat_bootstrap"
     print("✓ bootstrap (no logs) writes NO_NEW_POSITIONS (fail-closed)")
 
 
@@ -85,9 +90,7 @@ def test_normal_fresh_no_write(tmp_path, monkeypatch):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     state = tmp_path / "risk_state.json"
-    obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
-           "ts": int(time.time() * 1000), "reason": "test fresh"}
-    obj["sig"] = sign(KEY, obj)
+    obj = _signed("NORMAL", int(time.time() * 1000), "test fresh")
     state.write_text(json.dumps(obj))
 
     _setenv(monkeypatch, log_dir, state)
@@ -104,9 +107,7 @@ def test_normal_stale_scanner_dead_heartbeat_abstains(tmp_path, monkeypatch):
     log_dir.mkdir()
     state = tmp_path / "risk_state.json"
     old_ts = int((time.time() - 3600) * 1000)
-    obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
-           "ts": old_ts, "reason": "old"}
-    obj["sig"] = sign(KEY, obj)
+    obj = _signed("NORMAL", old_ts, "old")
     state.write_text(json.dumps(obj))
 
     # No recent cycle log -> scanner not alive.
@@ -116,7 +117,7 @@ def test_normal_stale_scanner_dead_heartbeat_abstains(tmp_path, monkeypatch):
     rs = json.loads(state.read_text())
     assert rs["state"] == "NORMAL", "state should remain NORMAL"
     assert rs["ts"] == old_ts, "timestamp must NOT change (no renewal)"
-    assert "ABSTAIN" in rs.get("reason", ""), "reason should indicate abstain"
+    assert rs == obj, "ABSTAIN must not write anything (T1.4)"
     print("✓ stale NORMAL + scanner dead -> heartbeat ABSTAINS, state stays stale")
 
 
@@ -125,9 +126,7 @@ def test_non_normal_stale_abstains(tmp_path, monkeypatch):
     log_dir.mkdir()
     state = tmp_path / "risk_state.json"
     old_ts = int((time.time() - 3600) * 1000)
-    obj = {"profile": "hermes-yield-rotation", "state": "NO_NEW_POSITIONS",
-           "ts": old_ts, "reason": "was stale"}
-    obj["sig"] = sign(KEY, obj)
+    obj = _signed("NO_NEW_POSITIONS", old_ts, "was stale", risk_state.SOURCE_OPERATOR)
     state.write_text(json.dumps(obj))
 
     _setenv(monkeypatch, log_dir, state)
@@ -143,9 +142,7 @@ def test_bad_hmac_abstains(tmp_path, monkeypatch):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     state = tmp_path / "risk_state.json"
-    obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
-           "ts": int(time.time() * 1000), "reason": "tampered"}
-    obj["sig"] = sign("wrong-key", obj)  # signed with a DIFFERENT key
+    obj = risk_state.make_record("wrong-key", "NORMAL", "tampered", risk_state.SOURCE_RENEW, ts_ms=int(time.time() * 1000))  # signed with a DIFFERENT key
     state.write_text(json.dumps(obj))
 
     _setenv(monkeypatch, log_dir, state)
@@ -160,9 +157,7 @@ def test_blocking_code_in_log_abstains(tmp_path, monkeypatch):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     state = tmp_path / "risk_state.json"
-    obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
-           "ts": int(time.time() * 1000), "reason": "test"}
-    obj["sig"] = sign(KEY, obj)
+    obj = _signed("NORMAL", int(time.time() * 1000), "test")
     state.write_text(json.dumps(obj))
 
     (log_dir / "2026-09-14.jsonl").write_text(json.dumps({
@@ -183,9 +178,7 @@ def test_non_blocking_code_in_log_allows_renewal(tmp_path, monkeypatch):
     log_dir.mkdir()
     state = tmp_path / "risk_state.json"
     old_ts = int((time.time() - 3600) * 1000)
-    obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
-           "ts": old_ts, "reason": "old"}
-    obj["sig"] = sign(KEY, obj)
+    obj = _signed("NORMAL", old_ts, "old")
     state.write_text(json.dumps(obj))
 
     # Recent cycle (within scanner window: 30 min) with non-blocking alert.
@@ -212,9 +205,7 @@ def test_stale_normal_scanner_dead_heartbeat_abstains(tmp_path, monkeypatch):
 
     # Stale NORMAL, but NO cycle log at all -> scanner never produced a decision.
     old_ts = int((time.time() - 3600) * 1000)
-    obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
-           "ts": old_ts, "reason": "stale"}
-    obj["sig"] = sign(KEY, obj)
+    obj = _signed("NORMAL", old_ts, "stale")
     state.write_text(json.dumps(obj))
 
     # Empty log dir -> no verified cycle ever, scanner not alive.
@@ -224,7 +215,7 @@ def test_stale_normal_scanner_dead_heartbeat_abstains(tmp_path, monkeypatch):
     rs = json.loads(state.read_text())
     assert rs["state"] == "NORMAL", "state should remain NORMAL"
     assert rs["ts"] == old_ts, "timestamp must NOT change (no renewal)"
-    assert "ABSTAIN" in rs.get("reason", ""), "reason should indicate abstain"
+    assert rs == obj, "ABSTAIN must not write anything (T1.4)"
     print("✓ stale NORMAL + scanner dead -> heartbeat ABSTAINS, state stays stale")
 
 
@@ -236,9 +227,7 @@ def test_stale_normal_scanner_alive_heartbeat_renews(tmp_path, monkeypatch):
 
     # Stale NORMAL
     old_ts = int((time.time() - 3600) * 1000)
-    obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
-           "ts": old_ts, "reason": "stale"}
-    obj["sig"] = sign(KEY, obj)
+    obj = _signed("NORMAL", old_ts, "stale")
     state.write_text(json.dumps(obj))
 
     # Recent cycle (within scanner window) with non-blocking alert -> scanner alive.
@@ -271,9 +260,7 @@ def test_stuck_scenario_risk_state_stale_heartbeat_writes_normal(tmp_path, monke
 
     # Step 1: risk state is STALE NORMAL (the stuck condition).
     old_ts = int((time.time() - 3600) * 1000)
-    obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
-           "ts": old_ts, "reason": "stale from previous cycle"}
-    obj["sig"] = sign(KEY, obj)
+    obj = _signed("NORMAL", old_ts, "stale from previous cycle")
     state.write_text(json.dumps(obj))
 
     # Previous cycle surfaced a non-fatal RISK_STATE_STALE alert.
@@ -305,3 +292,149 @@ def test_stuck_scenario_risk_state_stale_heartbeat_writes_normal(tmp_path, monke
     assert forced is False, "next cycle must run WITHOUT forced:true"
     print("✓ STUCK scenario: stale NORMAL -> heartbeat renews -> "
           "next cycle runs without forced:true")
+
+
+# --------------------------------------------------------------------------- #
+# Phase 1 — T1.3 bootstrap promotion, T1.4 robustness                         #
+# --------------------------------------------------------------------------- #
+
+import pytest  # noqa: E402
+
+import run_yield_cycle  # noqa: E402
+from helpers import FakeAgent, FakeBybit, load_cfg, reply_with  # noqa: E402
+
+HOLD = {"action": "HOLD", "coin": "USDT", "product_id": "1", "reason": "nothing to do"}
+
+
+@pytest.fixture
+def hb(isolated_paths, monkeypatch):
+    """Heartbeat wired to the isolated config/log dir, with alerts captured."""
+    monkeypatch.setenv("HERMES_RISK_HMAC_KEY", KEY)
+    monkeypatch.setenv("YIELD_SKIP_API_CHECK", "1")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("ALERT_TELEGRAM_CHAT_ID", "1")
+    alerts = []
+    monkeypatch.setattr(heartbeat, "send_telegram_alert",
+                        lambda token, chat, text: alerts.append(text) or True)
+    isolated_paths["alerts"] = alerts
+    return isolated_paths
+
+
+def _cycle(paths):
+    cfg = load_cfg(paths)
+    rec, rc = run_yield_cycle.run_cycle(cfg, tool=FakeBybit(), agent=FakeAgent(reply_with(HOLD)))
+    return rec
+
+
+def _state(paths):
+    return json.loads(Path(paths["YIELD_STATE_FILE"]).read_text())
+
+
+def test_bootstrap_promotes_after_clean_cycle(hb):
+    assert heartbeat.main() == 0
+    boot = _state(hb)
+    assert boot["state"] == "NO_NEW_POSITIONS" and boot["source"] == "heartbeat_bootstrap"
+
+    # A second heartbeat without a cycle in between must not promote.
+    assert heartbeat.main() == 0
+    assert _state(hb) == boot
+
+    rec = _cycle(hb)
+    assert rec["risk_state"] == "NO_NEW_POSITIONS"
+    assert heartbeat.main() == 0
+    promoted = _state(hb)
+    assert promoted["state"] == "NORMAL"
+    assert promoted["source"] == "heartbeat_renew"
+    assert _valid(promoted)
+
+
+def test_bootstrap_not_promoted_by_cycle_before_its_ts(hb):
+    _cycle(hb)  # a clean cycle that ran BEFORE the bootstrap record existed
+    time.sleep(0.01)
+    risk_state.write(hb["YIELD_STATE_FILE"], KEY, "NO_NEW_POSITIONS", "boot",
+                     risk_state.SOURCE_BOOTSTRAP)
+    before = _state(hb)
+    assert heartbeat.main() == 0
+    assert _state(hb) == before
+
+
+def test_bootstrap_not_promoted_after_blocking_cycle(hb):
+    risk_state.write(hb["YIELD_STATE_FILE"], KEY, "NO_NEW_POSITIONS", "boot",
+                     risk_state.SOURCE_BOOTSTRAP)
+    rec = _cycle(hb)
+    # Simulate that the last cycle hard-failed.
+    log = next(Path(hb["LOG_DIR"]).glob("*.jsonl"))
+    rec["alerts"] = ["AGENT_PARSE_ERROR: x"]
+    log.write_text(json.dumps(rec) + "\n")
+    before = _state(hb)
+    assert heartbeat.main() == 0
+    assert _state(hb) == before
+
+
+def test_operator_state_never_promoted(hb):
+    risk_state.write(hb["YIELD_STATE_FILE"], KEY, "NO_NEW_POSITIONS", "manual hold",
+                     risk_state.SOURCE_OPERATOR)
+    before = Path(hb["YIELD_STATE_FILE"]).read_bytes()
+    for _ in range(3):
+        rec = _cycle(hb)
+        assert rec["risk_state"] == "NO_NEW_POSITIONS"
+        assert heartbeat.main() == 0
+    assert Path(hb["YIELD_STATE_FILE"]).read_bytes() == before
+
+
+def test_corrupt_state_not_overwritten(hb):
+    state_file = Path(hb["YIELD_STATE_FILE"])
+    state_file.write_text('{"state":"UNWIND","ts":17')
+    before = state_file.read_bytes()
+    assert heartbeat.main() == 0
+    assert state_file.read_bytes() == before
+    assert any("UNREADABLE" in a for a in hb["alerts"]), hb["alerts"]
+
+
+def test_abstain_does_not_write(hb):
+    state_file = Path(hb["YIELD_STATE_FILE"])
+    risk_state.write(state_file, KEY, "NORMAL", "old", risk_state.SOURCE_RENEW,
+                     ts_ms=int((time.time() - 3600) * 1000))
+    before = (state_file.read_bytes(), state_file.stat().st_mtime_ns)
+    time.sleep(0.01)
+    assert heartbeat.main() == 0  # no cycle ever ran -> scanner not alive -> ABSTAIN
+    assert (state_file.read_bytes(), state_file.stat().st_mtime_ns) == before
+
+
+_GOOD = lambda: risk_state.make_record(KEY, "NORMAL", "x", risk_state.SOURCE_RENEW)  # noqa: E731
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda o: {**o, "sig": None},
+    lambda o: {k: v for k, v in o.items() if k != "profile"},
+    lambda o: {k: v for k, v in o.items() if k != "source"},   # legacy record
+    lambda o: {**o, "ts": "17"},
+    lambda o: {**o, "state": ["NORMAL"]},
+    lambda o: [o],
+    lambda o: "NORMAL",
+    lambda o: None,
+], ids=["sig_null", "no_profile", "no_source", "ts_str", "state_list",
+        "top_level_list", "top_level_str", "null"])
+def test_heartbeat_survives_malformed_state(hb, mutate):
+    state_file = Path(hb["YIELD_STATE_FILE"])
+    state_file.write_text(json.dumps(mutate(_GOOD())))
+    before = state_file.read_bytes()
+    assert heartbeat.main() == 0
+    assert state_file.read_bytes() == before
+    assert hb["alerts"], "an unverifiable state must raise an alert"
+
+
+@pytest.mark.parametrize("last_line", ["not json", "[1, 2]", '{"alerts": "CRITICAL"}',
+                                       '{"ts": 5, "alerts": [null, 3]}'])
+def test_heartbeat_survives_malformed_cycle_log(hb, last_line):
+    risk_state.write(hb["YIELD_STATE_FILE"], KEY, "NORMAL", "old", risk_state.SOURCE_RENEW,
+                     ts_ms=int((time.time() - 3600) * 1000))
+    (Path(hb["LOG_DIR"]) / "2026-09-25.jsonl").write_text(last_line + "\n")
+    assert heartbeat.main() == 0
+
+
+def test_blocking_codes_are_exact():
+    # Rule 8: any change here must come with the wrapper change that motivates it.
+    assert set(heartbeat.BLOCKING_CODES) == {
+        "CONFIG_INCOMPLETE", "CRITICAL", "AGENT_PARSE_ERROR", "DECISION_VALIDATION_FAILED",
+    }

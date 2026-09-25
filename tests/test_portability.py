@@ -10,7 +10,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -38,7 +37,8 @@ print(json.dumps({
 }))
 """
 
-MODULES = ["run_yield_cycle", "heartbeat", "bybit_earn_tool", "executor", "signing"]
+MODULES = ["run_yield_cycle", "heartbeat", "bybit_earn_tool", "executor", "signing",
+           "risk_state", "settings"]
 
 
 def _clean_env(**extra):
@@ -148,24 +148,24 @@ def test_heartbeat_signs_with_profile_key_not_shared(isolated_paths, monkeypatch
     assert verify("profile-hmac", payload, rs["sig"])
 
 
-def test_wrapper_reads_hmac_key_from_profile_env(isolated_paths, monkeypatch):
+def test_wrapper_reads_hmac_key_from_profile_env(isolated_paths):
     """run_yield_cycle used to rely on bybit_earn_tool having copied
     /opt/hermes/.env into os.environ at import time.  It must read the key
     through the unified loader instead."""
-    _write(isolated_paths["YIELD_ENV_FILE"], HERMES_RISK_HMAC_KEY="profile-hmac")
+    import risk_state
     import run_yield_cycle
+    _write(isolated_paths["YIELD_ENV_FILE"], HERMES_RISK_HMAC_KEY="profile-hmac")
+    risk_state.write(isolated_paths["YIELD_STATE_FILE"], "profile-hmac", "NORMAL", "t",
+                     risk_state.SOURCE_OPERATOR)
+    state, meta, alerts = run_yield_cycle.resolve_risk_state()
+    assert (state, meta["code"], alerts) == ("NORMAL", "OK", [])
 
-    seen = {}
 
-    class FakeRiskState:
-        @staticmethod
-        def verify(path, secret):
-            seen["path"] = Path(path)
-            seen["secret"] = secret
-            return True, "ok", {"state": "NORMAL", "ts": int(time.time() * 1000)}
-
-    monkeypatch.setattr(run_yield_cycle, "_risk_state_module", lambda: FakeRiskState)
-    state, _raw, alerts = run_yield_cycle.verify_risk_state({})
-    assert state == "NORMAL" and alerts == []
-    assert seen["secret"] == "profile-hmac"
-    assert seen["path"] == isolated_paths["YIELD_STATE_FILE"]
+def test_risk_state_comes_from_the_repo_only():
+    """No fallback to /opt/hermes/tools: the repo's risk_state.py is the one."""
+    import risk_state
+    import run_yield_cycle
+    import settings
+    assert Path(risk_state.__file__).resolve().parent == REPO_ROOT
+    assert not hasattr(run_yield_cycle, "_risk_state_module")
+    assert not hasattr(settings, "risk_state_dir")

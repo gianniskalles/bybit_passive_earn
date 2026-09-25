@@ -14,7 +14,6 @@ Path overrides (all optional; defaults match the VPS layout):
   YIELD_HERMES_BIN       $YIELD_HERMES_HOME/.venv/bin/hermes
   YIELD_ENV_FILE         $YIELD_HERMES_HOME/.env      (profile secrets)
   YIELD_SHARED_ENV_FILE  /opt/data/.env               (shared; TELEGRAM_BOT_TOKEN only)
-  YIELD_RISK_STATE_DIR   $YIELD_HERMES_HOME/tools     (legacy home of risk_state.py)
 
 Env precedence (load_env):
   process env  >  profile .env  >  shared .env (TELEGRAM_BOT_TOKEN only)
@@ -70,10 +69,6 @@ def env_file() -> Path:
 
 def shared_env_file() -> Path:
     return _path("YIELD_SHARED_ENV_FILE", Path("/opt/data/.env"))
-
-
-def risk_state_dir() -> Path:
-    return _path("YIELD_RISK_STATE_DIR", hermes_home() / "tools")
 
 
 def load_env_file(path: Path) -> Dict[str, str]:

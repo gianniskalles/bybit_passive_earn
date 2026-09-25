@@ -22,11 +22,13 @@
 | `heartbeat.py` | **Καρδιακός παλμός**. Ανανεώνει τη risk_state ώστε ο επόμενος κύκλος να μη χρειάζεται `forced:true`. Λειτουργεί ξεχωριστά μέσω systemd timer. |
 | `settings.py` | **Όλα τα paths** (env var με default για το VPS) και το ενιαίο `load_env`. |
 | `signing.py` | **ΜΟΝΑΔΙΚΗ πηγή αλήθειας** για canonical JSON + HMAC-SHA256. Το εισάγουν ΚΑΙ το heartbeat.py ΚΑΙ το risk_state.py. |
-| `risk_state.py` (`/opt/hermes/tools/`) | Διαβάζει/γράφει/επαληθεύει τη risk_state. |
+| `risk_state.py` | Διαβάζει/γράφει/επαληθεύει τη risk_state (δομημένο αποτέλεσμα). CLI: `verify`, `write` (operator). |
 | `executor.py` | Dry-run vs live execution wrapper. |
 | `bybit_earn_tool.py` | Bybit Earn API client (CLI). |
 | `config/yield_rotation.yaml` | Όλες οι παράμετροι στρατηγικής. |
-| `tests/test_heartbeat.py` | 11 pytest tests για το heartbeat. |
+| `tests/test_heartbeat.py` | Tests του heartbeat (decision table, bootstrap, ανθεκτικότητα). |
+| `tests/test_cycle.py` | Tests του wrapper χωρίς LLM (πύλες, ποσά, REDEEM, prompt, JSON, εντολή agent). |
+| `tests/test_risk_state.py` | Tests του `risk_state.py`. |
 | `tests/test_portability.py` | Tests φορητότητας και προτεραιότητας `.env` (Φάση 0). |
 
 ## 2. ΓΙΑΤΙ ΥΠΑΡΧΕΙ ΤΟ heartbeat.py (το πρόβλημα που λύνει)
@@ -55,22 +57,63 @@ timestamp, και **ο επόμενος κύκλος τρέχει κανονικ
    εμφανίζεται ως `RISK_STATE_BAD_SIGNATURE` (υποψία παραποίησης) — όχι
    ως ασυμφωνία κώδικα. **Μην δημιουργήσεις δεύτερη υλοποίηση HMAC.**
 
-3. **Connecticut**: `risk_state` σε κατάσταση μη-NORMAL (π.χ.
-   `NO_NEW_POSITIONS`) **δεν ξαναγράφεται** από το heartbeat — το
-   σέβεται και απέχει (ABSTAIN). Ανανεώνει ΜΟΝΟ stale `NORMAL`.
+3. **Ο heartbeat δεν αγγίζει ποτέ κατάσταση που δεν έγραψε ο ίδιος για
+   bootstrap.** Προάγει σε `NORMAL` **μόνο** `NO_NEW_POSITIONS` με
+   `source: heartbeat_bootstrap`, και μόνο αφού ο τελευταίος κύκλος είναι
+   καθαρός, επαλήθευσε **αυτή ακριβώς** την εγγραφή (ίδιο `ts`) και έτρεξε
+   μετά από αυτή. Καταστάσεις `source: operator` και κάθε `UNWIND` δεν
+   ξαναγράφονται ποτέ. **ABSTAIN = καμία εγγραφή.**
 
-## 4. Ποιες καταστάσεις επεξεργάζεται το heartbeat (decision table)
+## 4. Decision table του heartbeat (Φάση 1)
 
-| Τρέχουσα risk_state | Αποτέλεσμα heartbeat |
+| Κατάσταση | Αποτέλεσμα |
 |---|---|
-| Καμία εκτέλεση ακόμα (bootstrap, φάκελος υπάρχει, 0 αρχεία) | Γράφει `NORMAL` (exit 0) |
-| Φάκελος LOG_DIR δεν υπάρχει | **ERROR exit 3** + alert (NON-βootstrap) |
-| `NORMAL` + φρέσκια | Δεν ξαναγράφει (OK, no write) |
-| `NORMAL` + stale | Ξαναγράφει `NORMAL` με νέο ts (renew) → επόμενος κύκλος χωρίς `forced:true` |
-| μη-`NORMAL` (π.χ. `NO_NEW_POSITIONS`) + stale | **ABSTAIN** — δεν υπερκαλύπτει |
-| Παρόν αλλά valid HMAC δεν επαληθεύεται | **ABSTAIN** — δεν υπερκαλύπτει |
-| Τελευταίος κύκλος βρέθηκε με blocking code (π.χ. `CONFIG_INCOMPLETE`) | **ABSTAIN** — δεν ανανεώνει |
-| Τελευταίος κύκλος βρέθηκε με non-blocking code (π.χ. `RISK_STATE_STALE`) | Επιτρέπει renewal |
+| Bybit API μη προσβάσιμο | ABSTAIN |
+| Τελευταίος κύκλος με εμποδιστικό κωδικό (`BLOCKING_CODES`) | ABSTAIN + alert |
+| Φάκελος LOG_DIR δεν υπάρχει | **ERROR exit 3** + alert |
+| Αρχείο απόν | Γράφει `NO_NEW_POSITIONS`, `source: heartbeat_bootstrap` |
+| Μη αναγνώσιμο / κακοσχηματισμένο / λάθος HMAC | ABSTAIN + alert, ποτέ αντικατάσταση |
+| Bootstrap `NO_NEW_POSITIONS` + επαληθευμένος καθαρός κύκλος μετά το `ts` | Γράφει `NORMAL`, `source: heartbeat_renew` |
+| `NORMAL` + φρέσκο | Τίποτα |
+| `NORMAL` + παλιό + scanner ζωντανός | Ανανεώνει `NORMAL` |
+| `NORMAL` + παλιό + scanner νεκρός | ABSTAIN + alert |
+| Οτιδήποτε άλλο (operator, `UNWIND`, bootstrap χωρίς κύκλο) | ABSTAIN (+ alert αν παλιό) |
+
+`BLOCKING_CODES` = `CONFIG_INCOMPLETE`, `CRITICAL`, `AGENT_PARSE_ERROR`,
+`DECISION_VALIDATION_FAILED`. Το `CYCLE_MODEL_MISMATCH` καταργήθηκε (T1.9).
+
+### Risk state στον wrapper
+
+`risk_state.py` (ρίζα repo) — εγγραφή `profile, state, ts, reason, source,
+sig`. Το `verify()` επιστρέφει `Verification(code, signature_valid, fresh,
+state, source, ts, ...)`. Εγγραφές χωρίς `source` (παλιό σχήμα) είναι
+`RISK_STATE_MALFORMED` — στο deploy ξεκινάμε από καινούργιο αρχείο.
+
+| Επαληθευμένη εγγραφή | Ενεργή κατάσταση |
+|---|---|
+| έγκυρη + φρέσκια | ό,τι είναι υπογεγραμμένο |
+| έγκυρη, παλιά (ή `ts` στο μέλλον) | NORMAL→NO_NEW_POSITIONS, NO_NEW_POSITIONS→ίδιο, UNWIND→UNWIND |
+| απούσα / άκυρη / κακοσχηματισμένη / χωρίς κλειδί | NO_NEW_POSITIONS + alert |
+
+Ο κύκλος **δεν τερματίζει** ποτέ λόγω risk state. Πύλες (ντετερμινιστικές,
+μετά το LLM, ακριβώς πριν την εκτέλεση):
+- `NO_NEW_POSITIONS`: κάθε STAKE αφαιρείται (`RISK_GATE_DROPPED_STAKE`,
+  μη-εμποδιστικό)· το `Executor` αρνείται STAKE και μόνο του
+  (`allow_new_positions`).
+- `UNWIND`: **το LLM δεν καλείται**· `REDEEM_ALL` από τα positions.
+- Σε κάθε κατάσταση: θέση σε προϊόν με status ≠ Available → REDEEM από τον
+  wrapper (`origin: wrapper`).
+
+### Ποσά (T1.5)
+
+Το LLM δεν δίνει ποσό (prompt v6). Ο wrapper:
+`min(idle − RESERVE_USD, MAX_PER_PRODUCT_USD − ήδη_κρατούμενο_στο_προϊόν,
+remaining_capacity, max_stake_amount)`, στρογγυλεμένο προς τα κάτω στο
+`precision` του προϊόντος· παράλειψη αν < `max(MIN_MOVE_USD,
+min_stake_amount)`. Το «ήδη κρατούμενο» προστέθηκε ώστε το
+`MAX_PER_PRODUCT_USD` να είναι όριο ανά προϊόν και όχι ανά κύκλο.
+Άγνωστο `precision`, `max_stake_amount` ή `min_stake_amount` → καμία STAKE
+(κανόνας 7). REDEEM = πάντα ολόκληρη η θέση, χωρίς όριο `MIN_MOVE_USD`.
 
 ## 5. Πώς τρέχεις τα tests (επιβεβαίωσε ότι όλα περνάνε)
 
@@ -110,36 +153,33 @@ pytest            # από τη ρίζα του repo — οπουδήποτε, �
 
 ## 6. Τρέχον σημείο προόδου
 
-Το σχέδιο ολοκλήρωσης είναι το `FINISH_PLAN.md`.
+Το σχέδιο ολοκλήρωσης είναι το `FINISH_PLAN.md`. Ο Hermes δεν εμπλέκεται
+μέχρι το deploy· οδηγίες στο `DEPLOY.md` (γράφεται στο τέλος της Φάσης 5).
 
-- ✅ **Φάση 0 — Φορητό repo** (T0.1–T0.4): `settings.py`, ενιαίο
-  `load_env`, pytest με `conftest.py`, `requirements*.txt`, GitHub Actions.
-  24/24 tests σε καθαρό clone (πριν: 0/11).
-- ⚠️ **`risk_state.py` ακόμα εκτός repo.** Ο wrapper το φορτώνει πλέον
-  lazily: πρώτα από το repo, αλλιώς από `YIELD_RISK_STATE_DIR`
-  (`/opt/hermes/tools`). Ο Hermes πρέπει να το κάνει commit στη ρίζα του repo
-  **πριν τη Φάση 1** (το T1.2 αλλάζει το `verify`).
-- ⚠️ Τα γνωστά ευρήματα K1–K17, K19, K20 του `FINISH_PLAN.md` **δεν έχουν
-  διορθωθεί ακόμα** — η Φάση 0 δεν αλλάζει καμία συμπεριφορά απόφασης.
-  Ειδικά: το test `test_bootstrap_no_logs_writes_normal` ελέγχει
-  `NO_NEW_POSITIONS` (K2) — διορθώνεται στο T1.3.
-- ⚠️ Deploy (Hermes): μετά το `git pull` χρειάζεται `pip install -r
-  requirements.txt` στο venv (ίδιες εξαρτήσεις με πριν: PyYAML, requests).
-  Το heartbeat δεν διαβάζει πλέον τίποτα άλλο από το `/opt/data/.env` εκτός
-  από `TELEGRAM_BOT_TOKEN` — αν το `HERMES_RISK_HMAC_KEY` ή κλειδιά Bybit
-  ζουν μόνο εκεί, πρέπει να μεταφερθούν στο `/opt/hermes/.env`.
+- ✅ **Φάση 0 — Φορητό repo** (T0.1–T0.4).
+- ✅ **Φάση 1 — Ασφάλεια** (T1.1–T1.10), K1–K4, K6–K11, K15 (μέρος K12:
+  ίδια εντολή agent σε παραγωγή και regression).
+  - `risk_state.py` στη ρίζα, χωρίς fallback στο `/opt/hermes/tools`.
+  - Prompt v6 (`PROMPT_VERSION: v6`)· το v4 στο `archive/`· το sha256 του
+    prompt στο record.
+  - `extract_json` δέχεται μόνο το **τελευταίο** αντικείμενο με το
+    `cycle_id` του κύκλου.
+  - Εντολή agent: `hermes chat --query-file /dev/stdin -Q --toolsets= -m
+    <RESOLVED_MODEL> --reasoning <...>` — prompt από stdin, χωρίς tools.
+- ⚠️ **Το prompt v6 δεν έχει δοκιμαστεί με το πραγματικό μοντέλο.** Το LLM
+  regression χρειάζεται τον agent στο VPS· τα fixtures είναι ακόμα σε
+  σχήμα v5 (`amount_usd`, `from_product_id`) και ξαναγράφονται στη Φάση 4.
+- ⚠️ Προς επιβεβαίωση στο testnet: ότι η Bybit επιστρέφει `precision` και
+  `maxStakeAmount` στο `/v5/earn/product`. Αν λείπουν, ο wrapper δεν κάνει
+  ποτέ STAKE (ασφαλής αποτυχία, φαίνεται στο `executions[].reason`).
+- Εκκρεμούν οι Φάσεις 2–5 (K5, K12–K14, K16, K17 μέρος, K19, K20).
 
 ## 7. Εκκρεμότητες / TODO για την επόμενη συνεδρία
 
-- [ ] **Live ενσωμάτωση heartbeat με τον wrapper** (end-to-end): τρέξε
-  το heartbeat και μετά 1 live cycle για να δεις ότι το 2º run γίνεται
-  χωρίς `forced:true`.
-- [ ] **Παρατήρηση ότι το τελευταίο πραγματικό scan** (2026-09-14) έβγαλε
-  `NO_NEW_POSITIONS/RISK_STATE_STALE` — brownout. Το heartbeat είναι η
-  άμυνα εναντίον αυτού.
+- [ ] Φάσεις 2–5 του `FINISH_PLAN.md`.
 - [ ] Αν προσθέσετε νέα αρχεία Python που γράφουν/διαβάζουν HMAC,
-  **βεβαιώσου ότι κάνουν import από `signing.py`** — ποτέ ξανά δεν
-  ανοσογονείται δεύτερη υλοποίηση.
+  **βεβαιώσου ότι κάνουν import από `signing.py`** — ποτέ δεύτερη
+  υλοποίηση.
 
 ## 8. Τι ΠΡΕΠΕΙ να πεις στο επόμενο «ξεκινάμε»
 
@@ -147,4 +187,4 @@ pytest            # από τη ρίζα του repo — οπουδήποτε, �
 
 ---
 
-_Τελευταία ενημέρωση: v5.3 (heartbeat rewrite commits)_
+_Τελευταία ενημέρωση: Φάση 1 του FINISH_PLAN (ασφάλεια)_
