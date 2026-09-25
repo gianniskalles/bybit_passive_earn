@@ -24,17 +24,31 @@ H="sudo -u hermes"
 - [ ] Το PR των Φάσεων 0–5 είναι merged στο `main` και το CI είναι πράσινο.
 - [ ] Ο Giannis έχει κάνει το repo **private** (FINISH_PLAN Α4).
 
-## Βήμα 1 — Σταμάτημα ό,τι τρέχει σήμερα
+## Βήμα 1 — Σταμάτημα του παλιού κύκλου και heartbeat
+
+> **⛔ ΜΗΝ αγγίξεις** — ανήκουν σε άλλες υπηρεσίες του VPS, ακόμα κι αν
+> εμφανιστούν σε κάποια λίστα:
+> - `hermes-gateway`
+> - `hermes-litellm`
+> - `hermes-george`
+> - `hermes-seo_agent`
+>
+> Αν ένα από αυτά (ή οποιοδήποτε άλλο `hermes-*`) βγει στα αποτελέσματα
+> παρακάτω, **άφησέ το ως έχει**.
 
 ```bash
-systemctl list-timers --all --no-pager | grep -iE 'yield|hermes' || true
-systemctl list-units --all --no-pager | grep -iE 'yield|heartbeat' || true
-crontab -l -u hermes 2>/dev/null | grep -iE 'yield|heartbeat|run_yield_cycle' || true
-crontab -l 2>/dev/null | grep -iE 'yield|heartbeat|run_yield_cycle' || true
+PAT='yield|heartbeat|run_yield_cycle'
+systemctl list-timers --all --no-pager | grep -iE "$PAT" || true
+systemctl list-units --all --no-pager  | grep -iE "$PAT" || true
+crontab -l -u hermes 2>/dev/null        | grep -iE "$PAT" || true
+crontab -l 2>/dev/null                  | grep -iE "$PAT" || true
 ```
 
-Απενεργοποίησε **κάθε** παλιό timer/service/cron του κύκλου ή του heartbeat
-που βρήκες (`systemctl disable --now <unit>` / σβήσε τη γραμμή του cron).
+Απενεργοποίησε **μόνο** τα timers/services/cron του παλιού κύκλου ή heartbeat
+που βρήκες με αυτό το φίλτρο (`systemctl disable --now <unit>` / σβήσε τη
+γραμμή του cron). Πριν απενεργοποιήσεις ένα unit, έλεγξε ότι το `ExecStart`
+του (`systemctl cat <unit>`) δείχνει σε `run_yield_cycle.py` ή `heartbeat.py`
+του `/opt/hermes/yield_rotation`· αν όχι, **σταμάτα και ρώτα**.
 Επανάλαβε τις εντολές: δεν πρέπει να τυπώνουν τίποτα που τρέχει.
 
 ## Βήμα 2 — Κώδικας και εξαρτήσεις
@@ -125,7 +139,7 @@ EOF
 (ο Giannis το φτιάχνει στο @BotFather), γιατί το κοινόχρηστο token το
 χρησιμοποιεί ήδη άλλη υπηρεσία. Αν ο Giannis δώσει token, βάλ' το ως
 `YIELD_TELEGRAM_BOT_TOKEN` στο `/opt/hermes/.env` με τον τρόπο του 3α. Χωρίς
-αυτό, παράλειψε το `--with-bot` στο βήμα 6.
+αυτό, παράλειψε το `--with-bot` στο βήμα 7.
 
 ## Βήμα 5 — Καινούργιο risk state (όχι μεταφορά του παλιού)
 
@@ -176,26 +190,7 @@ $PY -c 'import json; r=json.load(open("/tmp/cycle.json")); print(json.dumps(r["f
   || tail -n 1 /opt/hermes/logs/yield_rotation/$(date -u +%F).jsonl | $PY -c 'import json,sys; print(json.loads(sys.stdin.read())["filtered_by_wrapper"])'
 ```
 
-## Βήμα 6 — systemd
-
-```bash
-$REPO/deploy/install.sh              # ή: install.sh --with-bot  (αν υπάρχει YIELD_TELEGRAM_BOT_TOKEN)
-systemctl list-timers 'yield-*' --no-pager
-```
-
-Αναμενόμενο: τρία timers — `yield-cycle` (κάθε 10'), `yield-heartbeat` (κάθε
-5', στο :02/:07/…), `yield-summary` (06:55 UTC).
-
-Επιβεβαίωσε ότι ο agent τρέχει χωρίς tools και με το prompt από stdin (μετά
-τον επόμενο κύκλο):
-
-```bash
-journalctl -u yield-cycle -n 30 --no-pager
-tail -n 1 /opt/hermes/logs/yield_rotation/$(date -u +%F).jsonl | $PY -c 'import json,sys; r=json.loads(sys.stdin.read()); print(r["prompt_file"], r["prompt_sha256"][:12], r["model_requested_on_cli"], r["alerts"])'
-grep -n "toolsets=" $REPO/run_yield_cycle.py
-```
-
-## Βήμα 7 — LLM regression του prompt v6 (πριν το επταήμερο)
+## Βήμα 6 — LLM regression του prompt v6 (πριν από οποιονδήποτε timer)
 
 Μόνο εδώ υπάρχει το CLI του agent. Τρέχει τον κύκλο της παραγωγής απομονωμένα
 (δικό του risk state, κλειδί και logs· `DRY_RUN` πάντα) με το πραγματικό
@@ -207,7 +202,33 @@ cd $REPO && $H $PY tests/run_regression.py --runs 5 --out /opt/hermes/logs/regre
 
 Αναμενόμενο: `=== 25/25 passed ===` (5 σενάρια × 5). **Οποιοδήποτε FAIL →
 σταμάτα** και στείλε το αρχείο `--out` στον Giannis. Το επταήμερο δεν ξεκινά
-με αποτυχημένο regression.
+με αποτυχημένο regression — γι' αυτό τρέχει **πριν** εγκατασταθούν τα
+timers: μέχρι να περάσει, τίποτα δεν τρέχει προγραμματισμένα.
+
+## Βήμα 7 — systemd (μόνο αφού το βήμα 6 έβγαλε 25/25)
+
+```bash
+$REPO/deploy/install.sh              # ή: install.sh --with-bot  (αν υπάρχει YIELD_TELEGRAM_BOT_TOKEN)
+systemctl list-timers 'yield-*' --no-pager
+```
+
+Αναμενόμενο: τρία timers — `yield-cycle` (κάθε 10'), `yield-heartbeat` (κάθε
+5', στο :02/:07/…), `yield-summary` (06:55 UTC).
+
+Το `NORMAL` του βήματος 5 έχει πιθανώς παλιώσει όσο έτρεχε το regression· ο
+πρώτος προγραμματισμένος κύκλος θα τρέξει ως `NO_NEW_POSITIONS` με
+`RISK_STATE_STALE` (αναμενόμενο, μη-εμποδιστικό) και το επόμενο heartbeat
+το ανανεώνει. Μέσα σε ~15' το `risk_state.py verify` πρέπει να δείχνει
+`NORMAL`, `code: OK`.
+
+Επιβεβαίωσε ότι ο agent τρέχει χωρίς tools και με το prompt από stdin (μετά
+τον επόμενο κύκλο):
+
+```bash
+journalctl -u yield-cycle -n 30 --no-pager
+tail -n 1 /opt/hermes/logs/yield_rotation/$(date -u +%F).jsonl | $PY -c 'import json,sys; r=json.loads(sys.stdin.read()); print(r["prompt_file"], r["prompt_sha256"][:12], r["model_requested_on_cli"], r["alerts"])'
+grep -n "toolsets=" $REPO/run_yield_cycle.py
+```
 
 ## Βήμα 8 — Testnet (Φάση 6, βήμα 4) — ⛔ ΣΤΑΜΑΤΑ ΕΔΩ
 

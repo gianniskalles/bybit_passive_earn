@@ -558,13 +558,14 @@ def test_pending_order_with_lowercase_coin_blocks_stake(env):
     assert tool.placed == []
 
 
-def test_pending_order_outside_whitelist_blocks_every_coin(env):
+def test_pending_order_outside_whitelist_blocks_stake_not_exits(env):
     write_state(env["YIELD_STATE_FILE"], "NORMAL")
-    tool = FakeBybit(products=[product("1", status="NotAvailable")],
+    tool = FakeBybit(products=[product("1", status="NotAvailable"), product("2")],
                      positions=[position("1", amount="5")],
                      orders=[order("Stake", "99", coin="BTC", status="Pending")])
-    rec, _ = run(env, tool=tool, **LIVE)
-    assert tool.placed == []  # not even the mechanical REDEEM
+    stake_2 = {**STAKE_1, "product_id": "2"}
+    rec, _ = run(env, tool=tool, agent=FakeAgent(reply_with(stake_2)), **LIVE)
+    assert [(c[1], c[2]) for c in tool.calls] == [("Redeem", "1")]  # exit goes through, STAKE does not
     assert any(a.startswith("PENDING_ORDER_UNMATCHED") for a in rec["alerts"])
 
 
@@ -645,3 +646,55 @@ def test_old_successful_stake_is_not_double_counted(env):
     tool = FakeBybit(orders=[done])
     run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
     assert len(tool.placed) == 1
+
+
+
+# --- Pending orders never block exits, except a known pending Redeem ------- #
+
+def _unwind(env, orders_):
+    write_state(env["YIELD_STATE_FILE"], "UNWIND")
+    tool = FakeBybit(positions=[position("1", amount="5")], orders=orders_)
+    rec, _ = run(env, tool=tool, **LIVE)
+    return tool, rec
+
+
+def test_unwind_redeems_despite_unknown_order_status(env):
+    tool, _ = _unwind(env, [order("Redeem", "1", status="PartiallyProcessed")])
+    assert [(c[1], c[2], c[3]) for c in tool.calls] == [("Redeem", "1", "5")]
+
+
+def test_unwind_redeems_despite_pending_order_without_coin(env):
+    o = order("Stake", "1", status="Pending")
+    o.pop("coin")
+    tool, rec = _unwind(env, [o])
+    assert [(c[1], c[2], c[3]) for c in tool.calls] == [("Redeem", "1", "5")]
+    assert any(a.startswith("PENDING_ORDER_UNMATCHED") for a in rec["alerts"])
+
+
+def test_pending_stake_does_not_block_redeem(env):
+    tool, _ = _unwind(env, [order("Stake", "1", status="Pending")])
+    assert [(c[1], c[2]) for c in tool.calls] == [("Redeem", "1")]
+
+
+def test_known_pending_redeem_blocks_only_its_product(env):
+    write_state(env["YIELD_STATE_FILE"], "UNWIND")
+    tool = FakeBybit(positions=[position("1", amount="5"), position("2", amount="3")],
+                     orders=[order("Redeem", "1", status="Pending")])
+    run(env, tool=tool, **LIVE)
+    assert [(c[1], c[2]) for c in tool.calls] == [("Redeem", "2")]
+
+
+def test_known_pending_redeem_without_coin_still_blocks_its_product(env):
+    o = order("Redeem", "1", status="Pending")
+    o.pop("coin")
+    tool, _ = _unwind(env, [o])
+    assert tool.calls == []
+
+
+@pytest.mark.parametrize("status", ["PartiallyProcessed", None, "Pending"])
+def test_any_non_final_order_still_blocks_stake(env, status):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    o = order("Redeem", "1", status=status)
+    tool = FakeBybit(orders=[o])
+    run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert tool.placed == []

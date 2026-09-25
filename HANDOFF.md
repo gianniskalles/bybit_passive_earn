@@ -77,11 +77,16 @@
    προς τα κάτω στο `precision`· παράλειψη κάτω από `max(MIN_MOVE_USD,
    min_stake_amount)`. Άγνωστο `precision`/`min`/`max` → καμία STAKE.
    REDEEM = ολόκληρη η θέση.
-8. **Εκκρεμείς εντολές** (`GET /v5/earn/order`): status εκτός
-   `success`/`fail` = εκκρεμής → καμία νέα εντολή σε αυτό το νόμισμα.
-   Εκκρεμής που δεν αντιστοιχίζεται σε νόμισμα του whitelist (ή Stake χωρίς
-   αναγνώσιμο `productId`/`orderValue`) → **καμία νέα εντολή**
-   (`PENDING_ORDER_UNMATCHED`).
+8. **Εκκρεμείς εντολές** (`GET /v5/earn/order`) — **ασύμμετρα**:
+   - **STAKE** (fail closed): status εκτός `success`/`fail` (και άγνωστο) =
+     εκκρεμής → καμία STAKE σε αυτό το νόμισμα. Εκκρεμής που δεν
+     αντιστοιχίζεται σε νόμισμα του whitelist, ή Stake χωρίς αναγνώσιμο
+     `productId`/`orderValue` → **καμία STAKE** (`PENDING_ORDER_UNMATCHED`).
+   - **REDEEM** (οι έξοδοι δεν περιμένουν ποτέ την αβεβαιότητα): μπλοκάρεται
+     **μόνο** από γνωστή εκκρεμή Redeem (`orderType` redeem, `status`
+     pending) στο **ίδιο** `productId`. Άγνωστο status ή μη αντιστοιχισμένη
+     εντολή δεν μπλοκάρει ποτέ έξοδο — στη χειρότερη περίπτωση η Bybit
+     απορρίπτει μια διπλή εξαργύρωση.
 9. **Εκτέλεση** — μόνο `POST /v5/earn/place-order` (`category, orderType,
    accountType, amount, coin, productId, orderLinkId`). `orderLinkId =
    <cycle_id>-S|R-<productId>`. Το dry-run `would_call` είναι ακριβώς το

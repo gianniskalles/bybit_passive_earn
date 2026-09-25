@@ -176,12 +176,14 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
     Pulls the data the agent needs, applies COIN_WHITELIST, and records each
     filter drop.  Returns a dict with: scan, positions, balances, filtered,
     snapshot_meta, idle_per_coin, product_status, orders, pending_coins,
-    pending_stakes, pending_unmatched, data_errors.
+    pending_stakes, pending_unmatched, pending_redeem_pids, data_errors.
 
     Coins are normalised to upper case everywhere.  A pending order that
     cannot be attributed to a whitelisted coin (no coin, another coin), or a
     pending Stake without a readable productId/amount, lands in
-    `pending_unmatched` and blocks every new order (fail closed).
+    `pending_unmatched` and blocks every new STAKE (fail closed).  Exits are
+    blocked only by a known pending Redeem on the same productId
+    (`pending_redeem_pids`).
 
     Each Bybit source is read independently.  A failed read (BybitAPIError)
     is recorded in `data_errors[source]`; it is NEVER replaced by an empty
@@ -339,12 +341,20 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
                                                   "createdAt", "updatedAt")})
     except BybitAPIError as e:
         data_errors["orders"] = str(e)
+    # Pending orders are asymmetric: anything non-final or unattributable
+    # blocks new STAKE (fail closed); only a KNOWN pending Redeem blocks a
+    # REDEEM, and only for its own productId. An exit is never blocked by
+    # uncertainty — at worst Bybit rejects a duplicate redemption.
     pending_coins, pending_unmatched = set(), []
+    pending_redeem_pids: set = set()
     # Stake amounts committed but maybe not yet in positions: pending, plus
     # recently successful (RECENT_STAKE_WINDOW_MS).
     pending_stakes: Dict[str, Decimal] = {}
     for o in orders:
         status = str(o.get("status") or "").strip().lower()
+        if (status == "pending" and str(o.get("orderType") or "").strip().lower() == "redeem"
+                and _norm_id(o.get("productId")) is not None):
+            pending_redeem_pids.add(_norm_id(o.get("productId")))
         if status == "success" and str(o.get("orderType") or "").strip().lower() == "stake":
             created, pid, value = (_opt_float(o.get("createdAt")), _norm_id(o.get("productId")),
                                    _dec(o.get("orderValue")))
@@ -390,6 +400,7 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
             "product_info": product_info,
             "orders": orders, "pending_coins": sorted(pending_coins),
             "pending_stakes": pending_stakes, "pending_unmatched": pending_unmatched,
+            "pending_redeem_pids": sorted(pending_redeem_pids),
             "data_errors": data_errors}
 
 
@@ -692,15 +703,19 @@ def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
                positions: List[Dict], idle_per_coin: Dict[str, float],
                pending_coins: Optional[List[str]] = None,
                pending_stakes: Optional[Dict[str, Decimal]] = None,
-               block_all: bool = False) -> Tuple[List[Dict], List[Dict]]:
+               block_all: bool = False,
+               pending_redeem_pids: Optional[List[str]] = None) -> Tuple[List[Dict], List[Dict]]:
     """Turn decisions into executable orders.  Returns (orders, skipped),
     where `skipped` are execution-shaped records explaining why a decision
     produced no order.
 
-    No order is planned in a coin that has a pending Bybit order (T2.2) — a
-    redemption can take up to 48 h — and none at all when `block_all`.
-    Pending Stake amounts count against MAX_PER_PRODUCT_USD like held
-    positions do."""
+    Asymmetric on purpose:
+      STAKE  — none in a coin with any non-final Bybit order, none at all
+               when `block_all` (an unattributable pending order); pending
+               and recent Stake amounts count against MAX_PER_PRODUCT_USD.
+      REDEEM — blocked ONLY by a known pending Redeem on the same productId
+               (`pending_redeem_pids`). Exits never wait on uncertainty."""
+    redeem_blocked = set(pending_redeem_pids or [])
     pending = {_norm_coin(c) for c in (pending_coins or [])}
 
     def is_pending(coin: Optional[str]) -> bool:
@@ -729,10 +744,10 @@ def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
     def redeem(pid: str, coin: Optional[str], origin: str, reason: str) -> None:
         if pid in redeemed:
             return
-        if is_pending(coin):
+        if pid in redeem_blocked:
             redeemed.add(pid)
             skip({"action": "REDEEM", "coin": coin, "product_id": pid, "origin": origin},
-                 _pending_reason(coin, block_all))
+                 f"a Redeem for product {pid} is already pending at Bybit; not resent")
             return
         amount = held.get(pid)
         if amount is None or amount <= 0:
@@ -778,8 +793,8 @@ def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
 
 def _pending_reason(coin: Optional[str], block_all: bool) -> str:
     if block_all:
-        return "pending Bybit order not attributable to a whitelisted coin; no new orders at all"
-    return f"pending Bybit order in {coin}; no new order until it completes"
+        return "pending Bybit order not attributable to a whitelisted coin; no new STAKE"
+    return f"pending Bybit order in {coin}; no new STAKE until it completes"
 
 
 # --------------------------------------------------------------------------- #
@@ -924,7 +939,7 @@ def _cycle(cfg: Dict[str, Any], tool, agent: Agent, cycle_id: str, rec: Dict[str
     if data["pending_unmatched"]:
         ids = ", ".join(str(o.get("orderId") or o.get("orderLinkId")) for o in data["pending_unmatched"])
         alerts.append(f"PENDING_ORDER_UNMATCHED: {len(data['pending_unmatched'])} pending order(s) "
-                      f"not attributable to a whitelisted coin ({ids}); all new orders blocked")
+                      f"not attributable to a whitelisted coin ({ids}); all new STAKE blocked")
 
     if "positions" in data_errors:
         # Without positions nothing can be sized or redeemed safely: no LLM,
@@ -1009,7 +1024,8 @@ def _cycle(cfg: Dict[str, Any], tool, agent: Agent, cycle_id: str, rec: Dict[str
 
     orders, skipped = build_plan(decisions, cfg, scan, positions, data["idle_per_coin"],
                                  data["pending_coins"], data["pending_stakes"],
-                                 block_all=bool(data["pending_unmatched"]))
+                                 block_all=bool(data["pending_unmatched"]),
+                                 pending_redeem_pids=data["pending_redeem_pids"])
     rec["plan"] = orders
     executor = Executor(bybit_tool=tool, dry_run=cfg["DRY_RUN"],
                         allow_new_positions=allow_new_positions,

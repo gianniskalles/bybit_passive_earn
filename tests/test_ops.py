@@ -245,3 +245,25 @@ def test_install_script_syntax():
     text = script.read_text()
     assert "set -euo pipefail" in text
     assert ".env" not in text.split("\n", 3)[-1].replace("Never touches .env", "")
+
+
+# --- DEPLOY.md guard rails --------------------------------------------------- #
+
+DEPLOY = (REPO / "DEPLOY.md").read_text()
+
+
+def test_deploy_runs_regression_before_any_timer():
+    assert DEPLOY.index("tests/run_regression.py") < DEPLOY.index("deploy/install.sh")
+
+
+def test_deploy_step1_only_targets_yield_units():
+    step1 = DEPLOY[DEPLOY.index("## Βήμα 1"):DEPLOY.index("## Βήμα 2")]
+    assert "PAT='yield|heartbeat|run_yield_cycle'" in step1
+    assert "grep -iE 'yield|hermes'" not in step1
+    for svc in ("hermes-gateway", "hermes-litellm", "hermes-george", "hermes-seo_agent"):
+        assert svc in step1
+
+
+def test_deploy_stops_before_testnet():
+    testnet = DEPLOY[DEPLOY.index("## Βήμα 8"):DEPLOY.index("## Βήμα 9")]
+    assert "ΣΤΑΜΑΤΑ" in testnet and "έγκριση" in testnet
