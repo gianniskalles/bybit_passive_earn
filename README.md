@@ -1,5 +1,19 @@
 # run_yield_cycle.py — yield rotation cycle runner
 
+[![tests](https://github.com/gianniskalles/bybit_passive_earn/actions/workflows/tests.yml/badge.svg)](https://github.com/gianniskalles/bybit_passive_earn/actions/workflows/tests.yml)
+
+## Tests
+
+```bash
+git clone … && cd bybit_passive_earn
+pip install -r requirements-dev.txt
+pytest
+```
+
+No keys, no network and no `/opt` needed: `tests/conftest.py` points every
+path into a temp dir and refuses any socket connection. All paths are
+resolved in `settings.py` (env override, VPS default).
+
 Run a single Bybit Earn yield-rotation cycle. **This is the dry-run
 implementation; the live path is gated on user approval.**
 

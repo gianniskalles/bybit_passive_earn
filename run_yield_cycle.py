@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -49,33 +50,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-# Re-use the same load_env shim as bybit_earn_tool (it loads from
-# /opt/hermes/.env when this script is run by systemd as User=hermes
-# with an empty PATH and no shell).
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import bybit_earn_tool as bet  # noqa: E402
-from bybit_earn_tool import BybitEarnTool  # noqa: E402
-
-# Risk state verifier is in /opt/hermes/tools/risk_state.py
-sys.path.insert(0, "/opt/hermes/tools")
-import risk_state as rs  # noqa: E402
-
-from executor import Executor  # noqa: E402
+import settings
+from bybit_earn_tool import BybitEarnTool
+from executor import Executor
 
 
 # --------------------------------------------------------------------------- #
 # Paths & constants                                                           #
 # --------------------------------------------------------------------------- #
 
-ROOT = Path("/opt/hermes/yield_rotation")
-CONFIG_PATH = ROOT / "config" / "yield_rotation.yaml"
+# All paths come from settings.py (env override, VPS default). Nothing is
+# created or read at import time.
+ROOT = settings.ROOT
 PROMPT_PATH = ROOT / f"prompt_{os.environ.get('YIELD_ROTATION_PROMPT', 'v4')}.md"
-RISK_STATE_PATH = Path(os.environ.get("YIELD_STATE_FILE", "/opt/hermes/state/risk_state.json"))
-
-# Tunables that aren't policy, just plumbing.
-HERMES_BIN = "/opt/hermes/.venv/bin/hermes"
-HERMES_SESSION_DIR = Path("/opt/hermes/state/yield_rotation_sessions")
-HERMES_SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
 STALE_SNAPSHOT_MS = 4 * 60 * 60 * 1000  # 4 h — Bybit USDT APR history refresh
 JSONL_FILE = "{date}.jsonl"  # LOG_DIR / jsonl template
@@ -298,16 +285,36 @@ def _classify_risk_state_failure(reason: str) -> str:
     return "RISK_STATE_UNVERIFIED"
 
 
+def _risk_state_module():
+    """Load risk_state.py lazily (never at import time).
+
+    Prefers a copy committed in the repo; falls back to the legacy location
+    settings.risk_state_dir() (/opt/hermes/tools on the VPS) until it is.
+    """
+    try:
+        import risk_state  # type: ignore
+        return risk_state
+    except ImportError:
+        pass
+    path = settings.risk_state_dir() / "risk_state.py"
+    spec = importlib.util.spec_from_file_location("risk_state", path)
+    if spec is None or spec.loader is None or not path.exists():
+        raise ImportError(f"risk_state.py not found in repo or at {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def verify_risk_state(cfg: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict], List[str]]:
     """
     Returns (state, state_meta, alerts).
     On any failure: state=None, alerts=[reason]. The caller substitutes
     NO_NEW_POSITIONS.
     """
-    secret = os.environ.get("HERMES_RISK_HMAC_KEY", "")
+    secret = settings.load_env().get("HERMES_RISK_HMAC_KEY", "")
     if not secret:
         return None, None, ["NO_RISK_HMAC_KEY"]
-    ok, reason, raw = rs.verify(RISK_STATE_PATH, secret)
+    ok, reason, raw = _risk_state_module().verify(settings.risk_state_file(), secret)
     if not ok:
         code = _classify_risk_state_failure(reason)
         return None, None, [f"{code}: {reason}"]
@@ -335,8 +342,9 @@ def call_agent(prompt: str, cfg: Dict[str, Any], cycle_id: str) -> Tuple[str, Op
     )
 
     # Pass RESOLVED_MODEL directly to command line so alias map does not intervene
+    hermes_bin = settings.hermes_bin()
     cmd = [
-        HERMES_BIN, "chat",
+        str(hermes_bin), "chat",
         "-q", full_prompt,
         "-m", resolved_model,
         "--reasoning", reasoning,
@@ -348,8 +356,8 @@ def call_agent(prompt: str, cfg: Dict[str, Any], cycle_id: str) -> Tuple[str, Op
     # NOTE: every flag is explicit. If the global config changes, this
     # command line does not.
     env = {
-        "PATH": "/opt/hermes/.venv/bin:/usr/local/bin:/usr/bin:/bin",
-        "HOME": "/opt/hermes",
+        "PATH": f"{hermes_bin.parent}:/usr/local/bin:/usr/bin:/bin",
+        "HOME": str(settings.hermes_home()),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
     }
@@ -373,7 +381,9 @@ def call_agent(prompt: str, cfg: Dict[str, Any], cycle_id: str) -> Tuple[str, Op
         )
     # Persist the raw agent output for debugging/audit. The decision log
     # is the clean record; this is the raw bytes + stderr.
-    debug_path = HERMES_SESSION_DIR / f"{session_id}.raw"
+    session_dir = settings.session_dir()
+    session_dir.mkdir(parents=True, exist_ok=True)
+    debug_path = session_dir / f"{session_id}.raw"
     debug_path.write_text(
         f"--- stdout ---\n{raw}\n--- stderr ---\n{proc.stderr or ''}\n"
     )
@@ -530,7 +540,7 @@ def _apr_ma_24h(hist: List[Dict]) -> Optional[float]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=CONFIG_PATH)
+    parser.add_argument("--config", type=Path, default=settings.config_file())
     parser.add_argument("--dry-run", action="store_true",
                         help="override config DRY_RUN and force dry-run")
     args = parser.parse_args()
@@ -574,7 +584,7 @@ def main():
                 "balance_source": "real",
                 "risk_state_meta": {"verifier": "wrapper_safety_check", "reason": f"missing '{param}'"},
             }
-            write_decision_log(Path(cfg.get("LOG_DIR", "/opt/hermes/logs/yield_rotation")), rec)
+            write_decision_log(Path(cfg.get("LOG_DIR") or settings.default_log_dir()), rec)
             print(json.dumps(rec, ensure_ascii=False, indent=2))
             sys.exit(3) # Hard fail
 
@@ -611,7 +621,7 @@ def main():
                 "forced": True,
             },
         }
-        write_decision_log(Path(cfg.get("LOG_DIR", "/opt/hermes/logs/yield_rotation")), rec)
+        write_decision_log(Path(cfg.get("LOG_DIR") or settings.default_log_dir()), rec)
         print(json.dumps(rec, ensure_ascii=False, indent=2))
         sys.exit(3)  # Hard fail before LLM
 

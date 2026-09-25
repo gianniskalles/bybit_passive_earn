@@ -16,20 +16,7 @@ import urllib.parse
 
 import requests
 
-# Manual .env loading
-def load_env(path: str = "/opt/hermes/.env"):
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, val = line.split("=", 1)
-                    os.environ[key.strip()] = val.strip().strip('"').strip("'")
-
-load_env()
-# Fallback to local .env
-if not os.getenv("BYBIT_API_KEY"):
-    load_env(".env")
+import settings
 
 # Configuration
 BASE_URL = "https://api.bybit.com"
@@ -38,8 +25,9 @@ TIMEOUT = 30
 
 class BybitEarnTool:
     def __init__(self, api_key: str = None, api_secret: str = None):
-        self.api_key = api_key or os.getenv('BYBIT_API_KEY')
-        self.api_secret = api_secret or os.getenv('BYBIT_API_SECRET')
+        env = settings.load_env()
+        self.api_key = api_key or env.get('BYBIT_API_KEY')
+        self.api_secret = api_secret or env.get('BYBIT_API_SECRET')
         
         if not self.api_key or not self.api_secret:
             print("Warning: API credentials not set. Public endpoints will work.")

@@ -20,12 +20,14 @@
 |---|---|
 | `run_yield_cycle.py` | Ο **wrapper/verifier**: φορτώνει config, τραβάει snapshot, φιλτράρει προϊόντα, καλεί LLM agent, αξιολογεί αποφάσεις, εκτελεί. |
 | `heartbeat.py` | **Καρδιακός παλμός**. Ανανεώνει τη risk_state ώστε ο επόμενος κύκλος να μη χρειάζεται `forced:true`. Λειτουργεί ξεχωριστά μέσω systemd timer. |
+| `settings.py` | **Όλα τα paths** (env var με default για το VPS) και το ενιαίο `load_env`. |
 | `signing.py` | **ΜΟΝΑΔΙΚΗ πηγή αλήθειας** για canonical JSON + HMAC-SHA256. Το εισάγουν ΚΑΙ το heartbeat.py ΚΑΙ το risk_state.py. |
 | `risk_state.py` (`/opt/hermes/tools/`) | Διαβάζει/γράφει/επαληθεύει τη risk_state. |
 | `executor.py` | Dry-run vs live execution wrapper. |
 | `bybit_earn_tool.py` | Bybit Earn API client (CLI). |
 | `config/yield_rotation.yaml` | Όλες οι παράμετροι στρατηγικής. |
-| `tests/test_heartbeat.py` | **9 regression tests** για το heartbeat (v5.3). |
+| `tests/test_heartbeat.py` | 11 pytest tests για το heartbeat. |
+| `tests/test_portability.py` | Tests φορητότητας και προτεραιότητας `.env` (Φάση 0). |
 
 ## 2. ΓΙΑΤΙ ΥΠΑΡΧΕΙ ΤΟ heartbeat.py (το πρόβλημα που λύνει)
 
@@ -73,35 +75,59 @@ timestamp, και **ο επόμενος κύκλος τρέχει κανονικ
 ## 5. Πώς τρέχεις τα tests (επιβεβαίωσε ότι όλα περνάνε)
 
 ```bash
-# Δύο σετ tests:
-# 1) Οι 9 νέοι heartbeat tests (repo)
-python3 /opt/hermes/yield_rotation/tests/test_heartbeat.py
-
-# 2) Το παλιό 40-case regression suite
-cd /opt/hermes/yield_rotation && python3 -m pytest tests/run_regression.py -q
+pip install -r requirements-dev.txt
+pytest            # από τη ρίζα του repo — οπουδήποτε, όχι μόνο στο VPS
 ```
 
-Το `tests/test_heartbeat.py` έχει ειδικά escapes (env vars):
-- `YIELD_LOG_DIR`, `YIELD_STATE_FILE` — override διαδρομών
-- `YIELD_SKIP_API_CHECK=1` — δεν καλεί Bybit
-- `YIELD_SKIP_CONFIG_DCHECK` — `1` στο δοκιμαστικό path, `0` στο
-  ελεγχόμενο (missing LOG_DIR dir → exit 3)
+- Το `tests/conftest.py` στέλνει όλα τα paths σε `tmp_path`, σβήνει κλειδιά
+  από το περιβάλλον και **απαγορεύει κάθε σύνδεση δικτύου**.
+- Το `tests/run_regression.py` (LLM regression) **δεν** τρέχει από το
+  `pytest`· χρειάζεται τον πραγματικό agent στο VPS.
+- CI: `.github/workflows/tests.yml` τρέχει `pytest` σε κάθε push και PR.
+
+### Paths και `.env` (Φάση 0)
+
+Όλα τα paths βρίσκονται στο `settings.py`: env var με default για το VPS.
+Το `ROOT` προκύπτει από το `__file__`. Κανένα module δεν έχει side effect
+στο import (ούτε `mkdir`, ούτε ανάγνωση `.env`, ούτε `sys.path.insert`).
+
+| Env var | Default (VPS) |
+|---|---|
+| `YIELD_HERMES_HOME` | `/opt/hermes` |
+| `YIELD_CONFIG_FILE` | `<repo>/config/yield_rotation.yaml` |
+| `YIELD_STATE_FILE` | `/opt/hermes/state/risk_state.json` |
+| `YIELD_SESSION_DIR` | `/opt/hermes/state/yield_rotation_sessions` |
+| `YIELD_HERMES_BIN` | `/opt/hermes/.venv/bin/hermes` |
+| `YIELD_ENV_FILE` | `/opt/hermes/.env` |
+| `YIELD_SHARED_ENV_FILE` | `/opt/data/.env` |
+| `YIELD_RISK_STATE_DIR` | `/opt/hermes/tools` (προσωρινό, βλ. παρακάτω) |
+
+Ενιαίο `settings.load_env()`, χωρίς εγγραφή στο `os.environ`:
+**process env → `/opt/hermes/.env` → από το `/opt/data/.env` ΜΟΝΟ το
+`TELEGRAM_BOT_TOKEN`**. Το κοινόχρηστο αρχείο δεν μπορεί πλέον να δώσει ή να
+αντικαταστήσει κλειδιά Bybit ή το HMAC. Κανένα `.env` δεν φορτώνεται από το
+τρέχον directory.
 
 ## 6. Τρέχον σημείο προόδου
 
-- ✅ **v5.3 heartbeat rewrite ολοκληρωμένο** — 9/9 tests περνάνε
-  (συμπ. bootstrap-no-logs→NORMAL και το «κολλημένο» σενάριο
-  stale-NORMAL→renew→next cycle χωρίς forced:true).
-- ✅ `signing.py` κοινό (heartbeat + risk_state + tests το εισάγουν).
-- ✅ LOG_DIR ως misconfig-error (exit 3) αντί για σιωπηλό boot.
-- ⚠️ **ΕΚΚΡΕΜΕΙ:** η risk_state τρέχων κατάσταση είναι `NORMAL`
-  (ts 1789342994399, «fresh for staleness test»). Αναμένεται η heartbeat
-  να τη διατηρεί προσεγμένα.
-- ⚠️ **ΕΚΚΡΕΜΕΙ:** το `overwrites` με το wrapper/agent — το v5.3 heartbeat
-  υπάρχει και δοκιμάζεται **μεμονωμένα**· δεν έχει ακόμα ενσωματωθεί
-  πλήρως σε end-to-end live κύκλο μετά το rewrite.
-- ⚠️ **Πίσω στο μυαλό:** Cron daily scanner (betting) paused pending
-  acceptance test — ΔΕΝ σχετίζεται με αυτό το repo.
+Το σχέδιο ολοκλήρωσης είναι το `FINISH_PLAN.md`.
+
+- ✅ **Φάση 0 — Φορητό repo** (T0.1–T0.4): `settings.py`, ενιαίο
+  `load_env`, pytest με `conftest.py`, `requirements*.txt`, GitHub Actions.
+  24/24 tests σε καθαρό clone (πριν: 0/11).
+- ⚠️ **`risk_state.py` ακόμα εκτός repo.** Ο wrapper το φορτώνει πλέον
+  lazily: πρώτα από το repo, αλλιώς από `YIELD_RISK_STATE_DIR`
+  (`/opt/hermes/tools`). Ο Hermes πρέπει να το κάνει commit στη ρίζα του repo
+  **πριν τη Φάση 1** (το T1.2 αλλάζει το `verify`).
+- ⚠️ Τα γνωστά ευρήματα K1–K17, K19, K20 του `FINISH_PLAN.md` **δεν έχουν
+  διορθωθεί ακόμα** — η Φάση 0 δεν αλλάζει καμία συμπεριφορά απόφασης.
+  Ειδικά: το test `test_bootstrap_no_logs_writes_normal` ελέγχει
+  `NO_NEW_POSITIONS` (K2) — διορθώνεται στο T1.3.
+- ⚠️ Deploy (Hermes): μετά το `git pull` χρειάζεται `pip install -r
+  requirements.txt` στο venv (ίδιες εξαρτήσεις με πριν: PyYAML, requests).
+  Το heartbeat δεν διαβάζει πλέον τίποτα άλλο από το `/opt/data/.env` εκτός
+  από `TELEGRAM_BOT_TOKEN` — αν το `HERMES_RISK_HMAC_KEY` ή κλειδιά Bybit
+  ζουν μόνο εκεί, πρέπει να μεταφερθούν στο `/opt/hermes/.env`.
 
 ## 7. Εκκρεμότητες / TODO για την επόμενη συνεδρία
 

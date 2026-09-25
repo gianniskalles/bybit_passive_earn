@@ -30,7 +30,8 @@ explicitly:
   - LOG_DIR dir missing        -> error + alert (misconfig), do NOT write NORMAL
   - LOG_DIR exists, no *.jsonl -> bootstrap, write NORMAL
 
-Environment (each falls back to /opt/hermes/.env and /opt/data/.env):
+Environment (settings.load_env: process env > /opt/hermes/.env; the shared
+/opt/data/.env contributes TELEGRAM_BOT_TOKEN only):
   HERMES_RISK_HMAC_KEY  (required to sign/verify)
   BYBIT_API_KEY, BYBIT_API_SECRET, BYBIT_TESTNET
   ALERT_TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
@@ -47,28 +48,17 @@ import json
 import os
 import sys
 import time
-import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
 import yaml
 
-# Shared signing is the single source of truth. Add the repo dir so this
-# script (which lives in the repo) imports the SAME module as risk_state.py.
-_REPO_DIR = Path("/opt/hermes/yield_rotation")
-if str(_REPO_DIR) not in sys.path:
-    sys.path.insert(0, str(_REPO_DIR))
-from signing import sign, verify  # noqa: E402  (single source of truth)
+import settings
+from signing import sign, verify  # single source of truth
 
-# ---- Paths ----
-HERMES_DIR = Path("/opt/hermes")
-YIELD_DIR = HERMES_DIR / "yield_rotation"
-STATE_DIR = HERMES_DIR / "state"
-DEFAULT_STATE_FILE = STATE_DIR / "risk_state.json"
-DEFAULT_CONFIG_FILE = YIELD_DIR / "config" / "yield_rotation.yaml"
-
-RISK_STATE_FILE = Path(os.environ.get("YIELD_STATE_FILE", DEFAULT_STATE_FILE))
-CONFIG_FILE = Path(os.environ.get("YIELD_CONFIG_FILE", DEFAULT_CONFIG_FILE))
+# ---- Paths (settings.py: env override, VPS default) ----
+RISK_STATE_FILE = settings.risk_state_file()
+CONFIG_FILE = settings.config_file()
 SKIP_API_CHECK = os.environ.get("YIELD_SKIP_API_CHECK", "") == "1"
 # Test-only escape hatch (defaults: prod enforces LOG_DIR existence).
 SKIP_CONFIG_DCHECK = os.environ.get("YIELD_SKIP_CONFIG_DCHECK", "") == "1"
@@ -96,7 +86,7 @@ def resolve_log_dir(cfg: dict, env) -> Path:
     """Return the LOG_DIR: from config (wrapper source of truth), with a
     test-only env override. Raises on non-existent directory unless the test
     escape hatch or an override forces a path."""
-    cfg_dir = cfg.get("LOG_DIR") or str(DEFAULT_LOG_DIR_FALLBACK())
+    cfg_dir = cfg.get("LOG_DIR") or str(settings.default_log_dir())
     # Test-only: allow an override dir for the *_dir_missing_* tests.
     override = os.environ.get("YIELD_LOG_DIR", "")
     chosen = Path(override) if override else Path(cfg_dir)
@@ -108,43 +98,6 @@ def resolve_log_dir(cfg: dict, env) -> Path:
             f"This is a MISCONFIG — refusing to treat it as bootstrap."
         )
     return chosen
-
-
-def DEFAULT_LOG_DIR_FALLBACK() -> Path:
-    return Path("/opt/hermes/logs/yield_rotation")
-
-
-def load_env(path: Path | str) -> dict:
-    """Load KEY=VAL from .env file."""
-    p = Path(path) if not isinstance(path, Path) else path
-    try:
-        content = p.read_text()
-    except PermissionError:
-        if os.geteuid() == 0:
-            try:
-                result = subprocess.run(
-                    ["sudo", "-u", "hermes", "cat", str(p)],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.returncode == 0:
-                    content = result.stdout
-                else:
-                    return {}
-            except Exception:
-                return {}
-        else:
-            return {}
-    env = {}
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line:
-            k, v = line.split("=", 1)
-            env[k.strip()] = v.strip()
-    return env
 
 
 def write_risk_state(hmac_key: str, state: str, reason: str) -> dict:
@@ -176,7 +129,6 @@ def read_risk_state() -> dict | None:
 def check_bybit_api() -> bool:
     """Verify Bybit API is reachable (products + positions)."""
     try:
-        sys.path.insert(0, str(YIELD_DIR))
         from bybit_earn_tool import BybitEarnTool
         tool = BybitEarnTool()
         products = tool.get_earn_products()
@@ -304,14 +256,8 @@ def send_telegram_alert(bot_token: str, chat_id: str, text: str) -> bool:
 
 
 def main() -> int:
-    # Load .env files, but let the process environment win (test overrides).
-    env1 = load_env(HERMES_DIR / ".env")
-    env2 = load_env(Path("/opt/data/.env"))
-    merged = {**env1, **env2}
-    env = {k: v for k, v in merged.items() if k not in os.environ}
-    env.update({k: v for k, v in os.environ.items() if k in merged or k in
-                ("HERMES_RISK_HMAC_KEY", "YIELD_STATE_FILE", "YIELD_CONFIG_FILE",
-                 "YIELD_LOG_DIR", "YIELD_SKIP_API_CHECK", "YIELD_SKIP_CONFIG_DCHECK")})
+    # Process env > profile .env > shared .env (TELEGRAM_BOT_TOKEN only).
+    env = settings.load_env()
 
     hmac_key = env.get("HERMES_RISK_HMAC_KEY")
     if not hmac_key:

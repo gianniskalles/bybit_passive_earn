@@ -22,11 +22,13 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 from tests.fixtures import ALL_FIXTURES, get_fixture  # noqa: E402
+import settings  # noqa: E402
 
-PROMPT_PATH_DEFAULT = Path("/opt/hermes/yield_rotation/prompt_v5.md")
+PROMPT_PATH_DEFAULT = settings.ROOT / "prompt_v5.md"
 # hermes CLI binary path. /usr/local/bin/hermes is the gateway CLI
-# (hermes george, hermes seo). The agent is at /opt/hermes/.venv/bin/hermes.
-HERMES_BIN = "/opt/hermes/.venv/bin/hermes"
+# (hermes george, hermes seo). The agent is at /opt/hermes/.venv/bin/hermes
+# on the VPS (override with YIELD_HERMES_BIN).
+HERMES_BIN = str(settings.hermes_bin())
 DEFAULT_RUNS = 5
 DEFAULT_TIMEOUT = 180  # seconds, per the spec
 
