@@ -74,7 +74,8 @@ class FakeBybit:
 
     def get_earn_positions(self, coin=None):
         self._maybe_fail("get_earn_positions")
-        return [p for p in self.positions if coin is None or p.get("coin") == coin]
+        return [p for p in self.positions
+                if coin is None or str(p.get("coin")).upper() == coin.upper()]
 
     def get_earn_orders(self, **kw):
         self._maybe_fail("get_earn_orders")

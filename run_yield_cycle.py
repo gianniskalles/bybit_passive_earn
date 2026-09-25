@@ -58,8 +58,9 @@ AGENT_TIMEOUT_S = 280
 AGENT_ACTIONS = ("STAKE", "REDEEM", "REDEEM_ALL", "HOLD", "ALERT_ONLY",
                  "NO_NEW_POSITIONS", "REJECTED_CROSS_COIN")
 MANDATORY_PARAMS = ["ENTRY_APR", "RESOLVED_MODEL", "ACCOUNT_TYPE"]
-# Bybit Earn order statuses that are final; anything else counts as pending.
-FINAL_ORDER_STATUSES = ("Success", "Fail")
+# Bybit Earn order statuses that are final (compared case-insensitively);
+# anything else — including a missing or unknown status — counts as pending.
+FINAL_ORDER_STATUSES = ("success", "fail")
 
 # (raw_stdout, session_id) = agent(prompt, cfg, cycle_id)
 Agent = Callable[[str, Dict[str, Any], str], Tuple[str, Optional[str]]]
@@ -94,6 +95,13 @@ def _opt_float(value: Any) -> Optional[float]:
         return None
 
 
+def _norm_coin(value: Any) -> Optional[str]:
+    """'usdt ' -> 'USDT'; anything that is not a non-empty string -> None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().upper()
+
+
 def _opt_int(value: Any) -> Optional[int]:
     f = _opt_float(value)
     return int(f) if f is not None and f == int(f) and f >= 0 else None
@@ -104,7 +112,12 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
     Pulls the data the agent needs, applies COIN_WHITELIST, and records each
     filter drop.  Returns a dict with: scan, positions, balances, filtered,
     snapshot_meta, idle_per_coin, product_status, orders, pending_coins,
-    data_errors.
+    pending_stakes, pending_unmatched, data_errors.
+
+    Coins are normalised to upper case everywhere.  A pending order that
+    cannot be attributed to a whitelisted coin (no coin, another coin), or a
+    pending Stake without a readable productId/amount, lands in
+    `pending_unmatched` and blocks every new order (fail closed).
 
     Each Bybit source is read independently.  A failed read (BybitAPIError)
     is recorded in `data_errors[source]`; it is NEVER replaced by an empty
@@ -125,12 +138,12 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
         products = []
     # Live-scan age anchor: the input to MAX_SCAN_AGE_SECONDS.
     product_fetch_ts_ms = int(time.time() * 1000)
-    whitelist = list(cfg["COIN_WHITELIST"])
+    whitelist = [_norm_coin(c) for c in cfg["COIN_WHITELIST"]]
 
     scan: List[Dict] = []
     product_status: Dict[str, Any] = {}
     for p in products:
-        coin = p.get("coin")
+        coin = _norm_coin(p.get("coin"))
         if coin not in whitelist:
             continue
 
@@ -208,7 +221,7 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
         balance_data = {}
     if balance_data.get("list"):
         for c in balance_data["list"][0].get("coin", []):
-            coin = c.get("coin")
+            coin = _norm_coin(c.get("coin"))
             if coin not in whitelist:
                 continue
             wallet = _opt_float(c.get("walletBalance")) or 0.0
@@ -229,7 +242,7 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
                     raise BybitAPIError(f"unreadable position {p!r}")
                 positions.append({
                     "product_id": pid,
-                    "coin": p.get("coin"),
+                    "coin": _norm_coin(p.get("coin")) or coin,
                     "amount": amount,
                     "status": p.get("status"),
                 })
@@ -245,8 +258,23 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
                                                   "createdAt", "updatedAt")})
     except BybitAPIError as e:
         data_errors["orders"] = str(e)
-    pending_coins = sorted({o.get("coin") for o in orders
-                            if o.get("status") not in FINAL_ORDER_STATUSES})
+    pending_coins, pending_unmatched = set(), []
+    pending_stakes: Dict[str, Decimal] = {}
+    for o in orders:
+        if str(o.get("status") or "").strip().lower() in FINAL_ORDER_STATUSES:
+            continue
+        coin = _norm_coin(o.get("coin"))
+        if coin not in whitelist:
+            pending_unmatched.append(o)
+            continue
+        pending_coins.add(coin)
+        if str(o.get("orderType") or "").strip().lower() != "redeem":
+            # Stake (or an unknown type, treated as one): count it against the cap.
+            pid, value = _norm_id(o.get("productId")), _dec(o.get("orderValue"))
+            if pid is None or value is None or value < 0:
+                pending_unmatched.append(o)
+                continue
+            pending_stakes[pid] = pending_stakes.get(pid, Decimal(0)) + value
 
     # DRY_RUN-only simulated balance substitution.
     balance_source = "real"
@@ -268,7 +296,9 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {"scan": scan, "positions": positions, "balances": balances_summary,
             "filtered": filtered, "snapshot_meta": snapshot_meta,
             "idle_per_coin": real_idle_per_coin, "product_status": product_status,
-            "orders": orders, "pending_coins": pending_coins, "data_errors": data_errors}
+            "orders": orders, "pending_coins": sorted(pending_coins),
+            "pending_stakes": pending_stakes, "pending_unmatched": pending_unmatched,
+            "data_errors": data_errors}
 
 
 # --------------------------------------------------------------------------- #
@@ -501,7 +531,7 @@ def _drop_stakes(decisions: List[Dict], code: str, why: str) -> Tuple[List[Dict]
 
 
 def unwind_decisions(cfg: Dict[str, Any]) -> List[Dict]:
-    return [{"action": "REDEEM_ALL", "coin": coin, "origin": "wrapper",
+    return [{"action": "REDEEM_ALL", "coin": _norm_coin(coin), "origin": "wrapper",
              "reason": "risk_state UNWIND: wrapper redeems every position (no LLM)"}
             for coin in cfg["COIN_WHITELIST"]]
 
@@ -571,16 +601,30 @@ def compute_stake_amount(idle: Decimal, held: Decimal, product: Dict,
 
 def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
                positions: List[Dict], idle_per_coin: Dict[str, float],
-               pending_coins: Optional[List[str]] = None) -> Tuple[List[Dict], List[Dict]]:
+               pending_coins: Optional[List[str]] = None,
+               pending_stakes: Optional[Dict[str, Decimal]] = None,
+               block_all: bool = False) -> Tuple[List[Dict], List[Dict]]:
     """Turn decisions into executable orders.  Returns (orders, skipped),
     where `skipped` are execution-shaped records explaining why a decision
-    produced no order.  No order is planned in a coin that has a pending
-    Bybit order (T2.2) — a redemption can take up to 48 h."""
-    pending = set(pending_coins or [])
+    produced no order.
+
+    No order is planned in a coin that has a pending Bybit order (T2.2) — a
+    redemption can take up to 48 h — and none at all when `block_all`.
+    Pending Stake amounts count against MAX_PER_PRODUCT_USD like held
+    positions do."""
+    pending = {_norm_coin(c) for c in (pending_coins or [])}
+
+    def is_pending(coin: Optional[str]) -> bool:
+        return block_all or _norm_coin(coin) in pending
+
     scan_by_id = {p["product_id"]: p for p in scan}
     held: Dict[str, Decimal] = {}
     for p in positions:
         held[p["product_id"]] = held.get(p["product_id"], Decimal(0)) + (_dec(p.get("amount")) or Decimal(0))
+    # Committed to a product = held + pending stakes; only held can be redeemed.
+    committed = dict(held)
+    for pid, amount in (pending_stakes or {}).items():
+        committed[pid] = committed.get(pid, Decimal(0)) + amount
     idle = {c: _dec(v) or Decimal(0) for c, v in idle_per_coin.items()}
 
     orders: List[Dict] = []
@@ -596,10 +640,10 @@ def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
     def redeem(pid: str, coin: Optional[str], origin: str, reason: str) -> None:
         if pid in redeemed:
             return
-        if coin in pending:
+        if is_pending(coin):
             redeemed.add(pid)
             skip({"action": "REDEEM", "coin": coin, "product_id": pid, "origin": origin},
-                 f"pending Bybit order in {coin}; no new order until it completes")
+                 _pending_reason(coin, block_all))
             return
         amount = held.get(pid)
         if amount is None or amount <= 0:
@@ -617,7 +661,7 @@ def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
             redeem(d["product_id"], d.get("coin"), origin, str(d.get("reason", "")))
         elif action == "REDEEM_ALL":
             for p in positions:
-                if d.get("coin") in (None, p.get("coin")):
+                if d.get("coin") is None or _norm_coin(d.get("coin")) == _norm_coin(p.get("coin")):
                     redeem(p["product_id"], p.get("coin"), origin, str(d.get("reason", "")))
         elif action == "STAKE":
             pid = d["product_id"]
@@ -626,12 +670,12 @@ def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
                 continue
             product = scan_by_id[pid]
             coin = product["coin"]
-            if coin in pending:
+            if is_pending(coin):
                 staked.add(pid)
-                skip(d, f"pending Bybit order in {coin}; no new order until it completes")
+                skip(d, _pending_reason(coin, block_all))
                 continue
             amount, why = compute_stake_amount(idle.get(coin, Decimal(0)),
-                                               held.get(pid, Decimal(0)), product, cfg)
+                                               committed.get(pid, Decimal(0)), product, cfg)
             if amount is None:
                 skip(d, why)
                 continue
@@ -641,6 +685,12 @@ def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
                            "amount": _fmt(amount), "origin": origin,
                            "reason": f"{d.get('reason', '')} | amount: {why}"})
     return orders, skipped
+
+
+def _pending_reason(coin: Optional[str], block_all: bool) -> str:
+    if block_all:
+        return "pending Bybit order not attributable to a whitelisted coin; no new orders at all"
+    return f"pending Bybit order in {coin}; no new order until it completes"
 
 
 # --------------------------------------------------------------------------- #
@@ -757,6 +807,10 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
     alerts.extend(f"DATA_UNAVAILABLE: {src}: {err}" for src, err in sorted(data_errors.items()))
     if data["pending_coins"]:
         alerts.append(f"PENDING_ORDERS: {', '.join(map(str, data['pending_coins']))}")
+    if data["pending_unmatched"]:
+        ids = ", ".join(str(o.get("orderId") or o.get("orderLinkId")) for o in data["pending_unmatched"])
+        alerts.append(f"PENDING_ORDER_UNMATCHED: {len(data['pending_unmatched'])} pending order(s) "
+                      f"not attributable to a whitelisted coin ({ids}); all new orders blocked")
 
     if "positions" in data_errors:
         # Without positions nothing can be sized or redeemed safely: no LLM,
@@ -835,7 +889,8 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
     rec["decisions"] = decisions
 
     orders, skipped = build_plan(decisions, cfg, scan, positions, data["idle_per_coin"],
-                                 data["pending_coins"])
+                                 data["pending_coins"], data["pending_stakes"],
+                                 block_all=bool(data["pending_unmatched"]))
     rec["plan"] = orders
     executor = Executor(bybit_tool=tool, dry_run=cfg.get("DRY_RUN", True),
                         allow_new_positions=allow_new_positions,

@@ -546,3 +546,70 @@ def test_position_with_unreadable_fields_fails_closed(env, bad):
     rec, _ = run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
     assert tool.placed == []
     assert any(a.startswith("DATA_UNAVAILABLE: positions") for a in rec["alerts"])
+
+
+# --- T2.2 follow-up: pending orders must match fail-closed ---------------- #
+
+def _pending_without(field):
+    o = order("Stake", "1", status="Pending")
+    o.pop(field)
+    return o
+
+
+def test_pending_order_without_coin_blocks_stake(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(orders=[_pending_without("coin")])
+    rec, _ = run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert tool.placed == []
+    assert any(a.startswith("PENDING_ORDER_UNMATCHED") for a in rec["alerts"])
+
+
+def test_pending_order_with_lowercase_coin_blocks_stake(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(orders=[order("Stake", "1", coin="usdt", status="Pending")])
+    run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert tool.placed == []
+
+
+def test_pending_order_outside_whitelist_blocks_every_coin(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(products=[product("1", status="NotAvailable")],
+                     positions=[position("1", amount="5")],
+                     orders=[order("Stake", "99", coin="BTC", status="Pending")])
+    rec, _ = run(env, tool=tool, **LIVE)
+    assert tool.placed == []  # not even the mechanical REDEEM
+    assert any(a.startswith("PENDING_ORDER_UNMATCHED") for a in rec["alerts"])
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "success", " Fail "])
+def test_final_status_is_case_insensitive(env, status):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(orders=[order("Stake", "1", status=status)])
+    run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert len(tool.placed) == 1
+
+
+def test_cap_subtracts_pending_stake_in_product():
+    cfg = {"MAX_PER_PRODUCT_USD": 5, "RESERVE_USD": 0, "MIN_MOVE_USD": 1}
+    scan = [{"product_id": "1", "coin": "USDT", "precision": 8, "max_stake_amount": 1000,
+             "min_stake_amount": 1, "remaining_capacity": None}]
+    orders_, skipped = ryc.build_plan([dict(STAKE_1)], cfg, scan, [], {"USDT": 100},
+                                      pending_coins=[], pending_stakes={"1": Decimal("3")})
+    assert [o["amount"] for o in orders_] == ["2"]
+
+
+def test_pending_stake_with_unreadable_amount_blocks_everything(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    bad = order("Stake", "1", status="Pending")
+    bad["orderValue"] = None
+    tool = FakeBybit(orders=[bad])
+    rec, _ = run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert tool.placed == []
+    assert any(a.startswith("PENDING_ORDER_UNMATCHED") for a in rec["alerts"])
+
+
+def test_unwind_matches_coins_case_insensitively(env):
+    write_state(env["YIELD_STATE_FILE"], "UNWIND")
+    tool = FakeBybit(positions=[position("1", coin="usdt", amount="5")])
+    rec, _ = run(env, tool=tool, COIN_WHITELIST=["usdt"])
+    assert [(r["product_id"], r["amount"]) for r in redeem_executions(rec)] == [("1", "5")]
