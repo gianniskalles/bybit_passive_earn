@@ -70,7 +70,7 @@ from executor import Executor  # noqa: E402
 ROOT = Path("/opt/hermes/yield_rotation")
 CONFIG_PATH = ROOT / "config" / "yield_rotation.yaml"
 PROMPT_PATH = ROOT / f"prompt_{os.environ.get('YIELD_ROTATION_PROMPT', 'v4')}.md"
-RISK_STATE_PATH = Path("/opt/hermes/state/risk_state.json")
+RISK_STATE_PATH = Path(os.environ.get("YIELD_STATE_FILE", "/opt/hermes/state/risk_state.json"))
 
 # Tunables that aren't policy, just plumbing.
 HERMES_BIN = "/opt/hermes/.venv/bin/hermes"
@@ -757,6 +757,7 @@ def main():
         decisions, positions,
         balance_usdt=idle_for_coin,
         min_move_usd=cfg["MIN_MOVE_USD"],
+        scan=scan,  # pass scan data for minStakeAmount enforcement
     )
 
     # 8. Build final record

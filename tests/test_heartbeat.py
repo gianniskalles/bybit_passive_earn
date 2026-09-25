@@ -25,6 +25,7 @@ import os
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Both heartbeat.py and the tests use the SAME shared signing source.
@@ -54,7 +55,7 @@ def _valid(rs: dict) -> bool:
 
 
 def test_bootstrap_no_logs_writes_normal():
-    """Bootstrap: no cycle has ever run (log dir exists, no *.jsonl) -> NORMAL."""
+    """Bootstrap: no cycle has ever run (log dir exists, no *.jsonl) -> NO_NEW_POSITIONS (fail-closed)."""
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp) / "logs"
         log_dir.mkdir()
@@ -64,9 +65,9 @@ def test_bootstrap_no_logs_writes_normal():
         assert rc == 0, f"bootstrap should succeed, got {rc}"
         assert state.exists(), "risk_state.json should be created"
         rs = json.loads(state.read_text())
-        assert rs["state"] == "NORMAL", f"expected NORMAL, got {rs['state']}"
+        assert rs["state"] == "NO_NEW_POSITIONS", f"expected NO_NEW_POSITIONS (fail-closed), got {rs['state']}"
         assert _valid(rs), "HMAC must verify"
-    print("✓ bootstrap (no logs) writes NORMAL")
+    print("✓ bootstrap (no logs) writes NO_NEW_POSITIONS (fail-closed)")
 
 
 def test_log_dir_missing_errors():
@@ -101,7 +102,8 @@ def test_normal_fresh_no_write():
     print("✓ NORMAL + fresh -> no write")
 
 
-def test_normal_stale_renews():
+def test_normal_stale_scanner_dead_heartbeat_abstains():
+    """Scanner dead (no recent cycle) -> heartbeat ABSTAINS, stale NORMAL stays stale."""
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp) / "logs"
         log_dir.mkdir()
@@ -112,14 +114,15 @@ def test_normal_stale_renews():
         obj["sig"] = sign(KEY, obj)
         state.write_text(json.dumps(obj))
 
+        # No recent cycle log -> scanner not alive.
         _setenv(log_dir, state)
         rc = _run()
-        assert rc == 0
+        assert rc == 0, "heartbeat should succeed (abstain is not error)"
         rs = json.loads(state.read_text())
-        assert rs["state"] == "NORMAL"
-        assert "was stale" in rs["reason"]
-        assert rs["ts"] > old_ts
-    print("✓ NORMAL + stale -> renewed")
+        assert rs["state"] == "NORMAL", "state should remain NORMAL"
+        assert rs["ts"] == old_ts, "timestamp must NOT change (no renewal)"
+        assert "ABSTAIN" in rs.get("reason", ""), "reason should indicate abstain"
+    print("✓ stale NORMAL + scanner dead -> heartbeat ABSTAINS, state stays stale")
 
 
 def test_non_normal_stale_abstains():
@@ -194,8 +197,11 @@ def test_non_blocking_code_in_log_allows_renewal():
         obj["sig"] = sign(KEY, obj)
         state.write_text(json.dumps(obj))
 
+        # Recent cycle (within scanner window: 30 min) with non-blocking alert.
+        recent_ts = int((time.time() - 300) * 1000)  # 5 minutes ago
+        dt = datetime.fromtimestamp(recent_ts / 1000, tz=timezone.utc).isoformat()
         (log_dir / "2026-09-14.jsonl").write_text(json.dumps({
-            "ts": "2026-09-14T10:00:00Z", "cycle_id": "c",
+            "ts": dt, "cycle_id": "c",
             "alerts": ["RISK_STATE_STALE: risk_state stale (3600s old)"],
         }) + "\n")
 
@@ -205,6 +211,66 @@ def test_non_blocking_code_in_log_allows_renewal():
         rs = json.loads(state.read_text())
         assert "was stale" in rs["reason"], "must renew despite RISK_STATE_STALE"
     print("✓ non-blocking code in log -> allows renewal")
+
+
+def test_stale_normal_scanner_dead_heartbeat_abstains():
+    """Scanner dead (no recent cycle) -> heartbeat ABSTAINS, stale NORMAL stays stale."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        state = Path(tmp) / "risk_state.json"
+
+        # Stale NORMAL, but NO cycle log at all -> scanner never produced a decision.
+        old_ts = int((time.time() - 3600) * 1000)
+        obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
+               "ts": old_ts, "reason": "stale"}
+        obj["sig"] = sign(KEY, obj)
+        state.write_text(json.dumps(obj))
+
+        # Empty log dir -> no verified cycle ever, scanner not alive.
+        _setenv(log_dir, state)
+        rc = _run()
+        assert rc == 0, "heartbeat should succeed (abstain is not error)"
+        rs = json.loads(state.read_text())
+        assert rs["state"] == "NORMAL", "state should remain NORMAL"
+        assert rs["ts"] == old_ts, "timestamp must NOT change (no renewal)"
+        assert "ABSTAIN" in rs.get("reason", ""), "reason should indicate abstain"
+    print("✓ stale NORMAL + scanner dead -> heartbeat ABSTAINS, state stays stale")
+
+
+def test_stale_normal_scanner_alive_heartbeat_renews():
+    """Scanner alive (recent non-blocking cycle) -> heartbeat RENEWS stale NORMAL."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp) / "logs"
+        log_dir.mkdir()
+        state = Path(tmp) / "risk_state.json"
+
+        # Stale NORMAL
+        old_ts = int((time.time() - 3600) * 1000)
+        obj = {"profile": "hermes-yield-rotation", "state": "NORMAL",
+               "ts": old_ts, "reason": "stale"}
+        obj["sig"] = sign(KEY, obj)
+        state.write_text(json.dumps(obj))
+
+        # Recent cycle (within scanner window) with non-blocking alert -> scanner alive.
+        # The scanner window is max(MAX_AGE_MS, 3 * interval_min * 60 * 1000)
+        # MAX_AGE_MS = 30 min, interval = 10 min -> window = 30 min.
+        # Use a cycle from 5 minutes ago.
+        recent_ts = int((time.time() - 300) * 1000)
+        dt = datetime.fromtimestamp(recent_ts / 1000, tz=timezone.utc).isoformat()
+        (log_dir / "2026-09-14.jsonl").write_text(json.dumps({
+            "ts": dt, "cycle_id": "recent_cycle",
+            "alerts": ["RISK_STATE_STALE: risk_state stale (3600s old)"],
+        }) + "\n")
+
+        _setenv(log_dir, state)
+        rc = _run()
+        assert rc == 0, "heartbeat should succeed"
+        rs = json.loads(state.read_text())
+        assert rs["state"] == "NORMAL"
+        assert rs["ts"] > old_ts, "timestamp MUST refresh (renewal happened)"
+        assert "scanner alive" in rs["reason"], "reason should mention scanner alive"
+    print("✓ stale NORMAL + scanner alive -> heartbeat RENEWS")
 
 
 def test_stuck_scenario_risk_state_stale_heartbeat_writes_normal():
@@ -223,8 +289,11 @@ def test_stuck_scenario_risk_state_stale_heartbeat_writes_normal():
         state.write_text(json.dumps(obj))
 
         # Previous cycle surfaced a non-fatal RISK_STATE_STALE alert.
+        # Make it recent (within scanner window of 30 min).
+        recent_ts = int((time.time() - 300) * 1000)  # 5 minutes ago
+        dt = datetime.fromtimestamp(recent_ts / 1000, tz=timezone.utc).isoformat()
         (log_dir / "2026-09-14.jsonl").write_text(json.dumps({
-            "ts": "2026-09-14T10:00:00Z", "cycle_id": "stuck_cycle",
+            "ts": dt, "cycle_id": "stuck_cycle",
             "alerts": ["RISK_STATE_STALE: risk_state stale (3600s old)"],
         }) + "\n")
 
@@ -255,11 +324,13 @@ def run_all_tests():
         test_bootstrap_no_logs_writes_normal,
         test_log_dir_missing_errors,
         test_normal_fresh_no_write,
-        test_normal_stale_renews,
+        test_normal_stale_scanner_dead_heartbeat_abstains,
         test_non_normal_stale_abstains,
         test_bad_hmac_abstains,
         test_blocking_code_in_log_abstains,
         test_non_blocking_code_in_log_allows_renewal,
+        test_stale_normal_scanner_dead_heartbeat_abstains,
+        test_stale_normal_scanner_alive_heartbeat_renews,
         test_stuck_scenario_risk_state_stale_heartbeat_writes_normal,
     ]
     passed = failed = 0

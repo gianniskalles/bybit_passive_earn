@@ -49,7 +49,7 @@ import sys
 import time
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import yaml
 
@@ -233,6 +233,54 @@ def get_current_risk_state() -> str | None:
     return rs.get("state")
 
 
+def latest_cycle_age_ms(log_dir: Path) -> int | None:
+    """Age (ms) of the newest cycle-log decision, or None if there is no
+    readable cycle log.  None means 'the scanner has produced no decision we
+    can see' — treated as scanner-not-alive (fail-closed)."""
+    logs = sorted(log_dir.glob("*.jsonl"))
+    if not logs:
+        return None
+    latest = logs[-1]
+    try:
+        lines = latest.read_text().strip().splitlines()
+        if not lines:
+            return None
+        rec = json.loads(lines[-1])
+        ts = rec.get("ts")
+        if not ts:
+            return None
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int((datetime.now(timezone.utc) - dt).total_seconds() * 1000)
+    except Exception:
+        return None
+
+
+def scanner_alive(log_dir: Path, alive_window_ms: int) -> bool:
+    """True iff the scanner produced a decision recently (latest cycle log is
+    non-blocking — guaranteed by check_last_cycle_ok above — and within the
+    liveness window).  This is the Q2 guard: the heartbeat renews a stale
+    NORMAL ONLY when it has EXTERNAL evidence the scanner is alive, never
+    merely because the heartbeat itself runs."""
+    age = latest_cycle_age_ms(log_dir)
+    if age is None:
+        return False  # no decision at all -> scanner not alive
+    return 0 <= age < alive_window_ms
+
+
+def has_verified_cycle_ever(log_dir: Path) -> bool:
+    """True iff at least ONE verified (non-blocking) supervision cycle has ever
+    completed — i.e. a *.jsonl exists whose last record is non-blocking.
+    Bootstrap gate: fail-closed (NO_NEW_POSITIONS) while this is False, so a
+    brand-new never-run system does NOT start in NORMAL."""
+    logs = sorted(log_dir.glob("*.jsonl"))
+    if not logs:
+        return False
+    ok, _ = check_last_cycle_ok(log_dir)
+    return ok
+
+
 def is_risk_state_fresh(rs: dict) -> bool:
     """Check if risk state timestamp is within MAX_AGE_MS."""
     if not rs or "ts" not in rs:
@@ -310,10 +358,26 @@ def main() -> int:
     # Condition 3: risk state matrix.
     rs = read_risk_state()
 
-    # File absent -> write NORMAL (bootstrap / clean slate).
+    # Q1/Q2 liveness window: the scanner must have reported within 3 cycle
+    # intervals to be considered alive.  Read from the SAME config as the
+    # wrapper (never guessed).
+    interval_min = int(cfg.get("CYCLE_INTERVAL_MINUTES", 10) or 10)
+    scanner_window_ms = max(MAX_AGE_MS, 3 * interval_min * 60 * 1000)
+    alive = scanner_alive(log_dir, scanner_window_ms)
+
+    # File absent -> bootstrap.
     if rs is None:
-        write_risk_state(hmac_key, "NORMAL", "heartbeat (was missing)")
-        print("[heartbeat] WROTE: NORMAL (was missing)")
+        if has_verified_cycle_ever(log_dir):
+            # A validated supervision cycle has completed before (state file
+            # just vanished).  Re-establish NORMAL — the system was running.
+            write_risk_state(hmac_key, "NORMAL", "heartbeat (was missing, verified cycle seen)")
+            print("[heartbeat] WROTE: NORMAL (was missing; verified cycle seen)")
+            return 0
+        # Brand-new, never-run, or no verified cycle ever -> FAIL-CLOSED.
+        # Door is not opened until ONE verified supervision cycle completes.
+        write_risk_state(hmac_key, "NO_NEW_POSITIONS",
+                         "heartbeat bootstrap: no verified supervision cycle yet")
+        print("[heartbeat] WROTE: NO_NEW_POSITIONS (bootstrap, no verified cycle)")
         return 0
 
     # Present but unverifiable -> ABSTAIN + alert, never overwrite.
@@ -354,10 +418,37 @@ def main() -> int:
         print("[heartbeat] OK: state is NORMAL and fresh")
         return 0
 
-    # NORMAL but stale -> write fresh NORMAL.
+    # NORMAL but stale -> renew ONLY if scanner is alive (produced a recent decision).
+    # This is the Q2 liveness guard: heartbeat must NOT renew merely because it runs;
+    # it must have EXTERNAL evidence that the scanner is producing decisions.
+    if not scanner_alive(log_dir, scanner_window_ms):
+        age_min = max(0, (int(time.time() * 1000) - int(rs["ts"])) // 60000)
+        # Preserve state and timestamp, but update reason to indicate abstain.
+        abstain_obj = {
+            "profile": rs["profile"],
+            "state": rs["state"],
+            "ts": rs["ts"],
+            "reason": f"heartbeat ABSTAIN: scanner not alive (no recent decision)"
+        }
+        abstain_obj["sig"] = sign(hmac_key, abstain_obj)
+        tmp = RISK_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(abstain_obj, separators=(",", ":")))
+        tmp.replace(RISK_STATE_FILE)
+        print(f"[heartbeat] ABSTAIN: NORMAL but stale ({age_min} min) AND scanner not alive (no recent decision). NOT renewing.")
+        bot_token = env.get("TELEGRAM_BOT_TOKEN")
+        chat_id = env.get("ALERT_TELEGRAM_CHAT_ID")
+        if bot_token and chat_id:
+            send_telegram_alert(
+                bot_token, chat_id,
+                f"⚠️ HEARTBEAT ABSTAIN: risk state is NORMAL but STALE ({age_min} min) "
+                f"AND scanner has not produced a recent decision. Risk state NOT renewed."
+            )
+        return 0
+
+    # Scanner is alive -> safe to renew stale NORMAL.
     age_min = max(0, (int(time.time() * 1000) - int(rs["ts"])) // 60000)
-    write_risk_state(hmac_key, "NORMAL", f"heartbeat (was stale {age_min} min)")
-    print(f"[heartbeat] WROTE: NORMAL (was stale {age_min} min)")
+    write_risk_state(hmac_key, "NORMAL", f"heartbeat (was stale {age_min} min, scanner alive)")
+    print(f"[heartbeat] WROTE: NORMAL (was stale {age_min} min, scanner alive)")
     return 0
 
 

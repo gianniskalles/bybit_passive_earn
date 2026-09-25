@@ -26,12 +26,25 @@ class Executor:
 
     # ---- plan execution ----
     def execute_plan(self, decisions: List[Dict], positions: List[Dict],
-                     balance_usdt: float, min_move_usd: float) -> List[Dict]:
+                     balance_usdt: float, min_move_usd: float,
+                     scan: List[Dict] = None) -> List[Dict]:
         """
         Walk the agent's decisions, build would-call / real-call records.
         Returns a list of execution records (one per would-be action).
+        
+        scan: optional list of product data from the wrapper (includes min_stake_amount).
+              Used to enforce minStakeAmount per product.
         """
         records = []
+        # Build a lookup for min_stake_amount by product_id
+        min_stake_by_pid = {}
+        if scan:
+            for p in scan:
+                pid = p.get("product_id")
+                msa = p.get("min_stake_amount", 0)
+                if pid and msa:
+                    min_stake_by_pid[pid] = float(msa)
+
         for d in decisions:
             action = d.get("action")
             coin = d.get("coin")
@@ -76,6 +89,21 @@ class Executor:
                                        "params": {"productId": product_id, "amount": str(amount)}},
                         "executed": False,
                         "reason": f"amount {amount} < MIN_MOVE_USD {min_move_usd}; would churn state for nothing",
+                    })
+                    continue
+                # Enforce minStakeAmount per product (from Bybit product data)
+                min_stake = min_stake_by_pid.get(product_id)
+                if min_stake is not None and amount < min_stake:
+                    records.append({
+                        "ts": _now(),
+                        "action": "STAKE",
+                        "coin": coin,
+                        "product_id": product_id,
+                        "amount_usd": amount,
+                        "would_call": {"method": "POST", "path": "/v5/earn/subscribe",
+                                       "params": {"productId": product_id, "amount": str(amount)}},
+                        "executed": False,
+                        "reason": f"amount {amount} < product minStakeAmount {min_stake}; Bybit would reject",
                     })
                     continue
                 if amount > balance_usdt:
