@@ -1,302 +1,155 @@
 #!/usr/bin/env python3
-"""Regression test runner for the yield rotation prompt.
+"""LLM regression — runs the PRODUCTION cycle against the real model.
 
-For each fixture, compose the prompt with the fixture's inputs (the
-"wrapper view": verified risk_state + filtered scan), call hermes chat,
-parse JSON, validate against the expected behaviour, repeat N times.
-Report pass/fail per fixture and overall pass rate.
+Each scenario (tests/regression_fixtures.py) replays recorded Bybit
+responses through the real BybitEarnTool and calls run_yield_cycle.run_cycle
+with the production call_agent: same prompt file, same compose_prompt, same
+`hermes chat` command line (build_agent_command), same extract_json and
+validation, thresholds from the real config/yield_rotation.yaml.  Nothing
+here re-implements the production path, so the prompt the model sees is
+byte for byte the prompt production would send for the same data.
 
-Usage:
-  run_regression.py [--runs 5] [--fixtures 01_baseline,...] [--prompt PATH]
+Only decision quality is measured (T4.4). Deterministic behaviour is
+covered by the wrapper unit tests (`pytest`).
+
+Runs only where the agent CLI exists (the VPS):
+
+  /opt/hermes/.venv/bin/python tests/run_regression.py [--runs 5] \
+      [--fixtures 01_stake_when_rate_qualifies,...] [--out results.json]
+
+The run is isolated: its own risk_state file, HMAC key, log dir and
+session dir under a temporary directory. DRY_RUN is forced on.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
-import re
-import subprocess
+import os
 import sys
-import time
+import tempfile
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
-# Make tests/ importable
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from tests.fixtures import ALL_FIXTURES, get_fixture  # noqa: E402
+sys.path.insert(0, str(HERE))
+
+import risk_state  # noqa: E402
+import run_yield_cycle as ryc  # noqa: E402
 import settings  # noqa: E402
-from run_yield_cycle import build_agent_command, load_config  # noqa: E402
+from regression_fixtures import get, scenarios  # noqa: E402
+from replay import replay_tool  # noqa: E402
 
 DEFAULT_RUNS = 5
-DEFAULT_TIMEOUT = 180  # seconds, per the spec
+REGRESSION_KEY = "regression-only-key"
 
 
-def strip_otel(stdout: str) -> str:
-    """Remove OpenTelemetry tracing banner from stdout."""
-    # Look for the first line that starts with '{' (the JSON object)
-    for line in stdout.splitlines():
-        s = line.strip()
-        if s.startswith("{"):
-            return stdout[stdout.index(line):]
-    return stdout
+def regression_config(workdir: Path) -> Dict[str, Any]:
+    """The production config, with only the isolation knobs changed."""
+    cfg = ryc.load_config(settings.config_file())
+    cfg["LOG_DIR"] = str(workdir / "logs")
+    cfg["DRY_RUN"] = True
+    # Balances come from the scenario's recorded wallet, not a simulation.
+    cfg["SIMULATED_IDLE_BALANCE"] = None
+    return cfg
 
 
-def extract_json(stdout: str) -> dict | None:
-    """Extract JSON object from stdout, stripping any prose/fences.
+def isolate(workdir: Path) -> None:
+    """Point state, sessions and the HMAC key at `workdir` (process env wins
+    over the .env files in settings.load_env)."""
+    os.environ["YIELD_STATE_FILE"] = str(workdir / "risk_state.json")
+    os.environ["YIELD_SESSION_DIR"] = str(workdir / "sessions")
+    os.environ["HERMES_RISK_HMAC_KEY"] = REGRESSION_KEY
 
-    Strategy: find the FIRST top-level balanced JSON object. Skip
-    the OpenTelemetry banner, which itself may contain empty {}
-    or quoted JSON snippets. The agent's real output is always
-    one balanced object at the end.
-    """
-    s = strip_otel(stdout)
-    s = re.sub(r"^```(?:json)?\s*", "", s.strip())
-    s = re.sub(r"\s*```$", "", s)
-    # Walk the string, find the first { that starts a balanced object.
-    # Reject trivial {} so we don't grab an OTEL placeholder.
-    pos = 0
-    best = None
-    while True:
-        start = s.find("{", pos)
-        if start < 0:
-            break
-        depth = 0
-        end = -1
-        in_string = False
-        escape = False
-        for i in range(start, len(s)):
-            c = s[i]
-            if escape:
-                escape = False
-                continue
-            if c == "\\":
-                escape = True
-                continue
-            if c == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        if end < 0:
-            break
-        candidate = s[start:end]
-        if candidate.strip() == "{}":
-            # Empty object from OTEL banner; skip and keep looking.
-            pos = end
-            continue
+
+def run_once(scenario: Dict[str, Any], cfg: Dict[str, Any], agent: Callable) -> Dict[str, Any]:
+    """One production cycle for `scenario`. Returns the record plus what the
+    agent saw and said."""
+    risk_state.write(Path(os.environ["YIELD_STATE_FILE"]), REGRESSION_KEY,
+                     scenario["risk_state"], "regression", risk_state.SOURCE_OPERATOR)
+    seen: Dict[str, Any] = {}
+
+    def capturing(prompt, cfg_, cycle_id):
+        seen["prompt"] = prompt
+        raw, session_id = agent(prompt, cfg_, cycle_id)
+        seen["raw"] = raw
+        return raw, session_id
+
+    rec, rc = ryc.run_cycle(cfg, tool=replay_tool(scenario["payload"]), agent=capturing)
+    agent_decisions: Optional[List[Dict]] = None
+    if "raw" in seen:
         try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            # Truncated or malformed; skip and keep looking.
-            pos = end
-            continue
-    return None
+            agent_decisions = ryc.extract_json(seen["raw"], rec["cycle_id"])["decisions"]
+        except ValueError:
+            agent_decisions = None
+    return {"record": rec, "rc": rc, "prompt": seen.get("prompt"), "raw": seen.get("raw"),
+            "agent_decisions": agent_decisions}
 
 
-def compose_prompt(prompt_template: str, fixture: dict) -> str:
-    """Append the fixture's wrapper view to the prompt template.
-
-    Wrapper view: the inputs the agent actually receives. Risk_state is
-    already verified, snapshot freshness already applied, config nulls
-    already flagged with CONFIG_INCOMPLETE.
-    """
-    risk_state = fixture["risk_state"]
-    wrapper_alerts = []
-    if not risk_state.get("verified", True):
-        wrapper_alerts.append(f"RISK_STATE_UNVERIFIED ({risk_state.get('failure_reason', 'unknown')})")
-
-    config = fixture["config"]
-    config_alerts = []
-    for k in ("ENTRY_APR", "EXIT_APR", "MIN_APR_EDGE"):
-        if config.get(k) is None:
-            config_alerts.append(f"CONFIG_INCOMPLETE (missing {k})")
-    wrapper_alerts.extend(config_alerts)
-
-    # If the fixture specifies that the wrapper dropped products due to
-    # stale APR-history data, add a STALE_HISTORY alert so the agent can echo it.
-    if fixture.get("wrapper_drops") == "STALE_HISTORY":
-        wrapper_alerts.append("STALE_HISTORY (apr_history_age_seconds > 4h)")
-
-    inputs_block = {
-        "wrapper_alerts": wrapper_alerts,
-        "config": config,
-        "risk_state": risk_state,
-        "positions": fixture["positions"],
-        "scan": fixture["scan"],
-    }
-    return (
-        f"{prompt_template}\n\n---\n\n"
-        f"**Cycle inputs (wrapper view):**\n\n"
-        f"```json\n{json.dumps(inputs_block, indent=2, ensure_ascii=False)}\n```\n"
-    )
-
-
-def call_hermes(prompt: str, cfg: dict, timeout: int) -> tuple[int, str, str, float]:
-    """Call hermes chat with EXACTLY the production command line
-    (run_yield_cycle.build_agent_command). Returns (exit, stdout, stderr, elapsed)."""
-    start = time.time()
-    try:
-        proc = subprocess.run(
-            build_agent_command(cfg),
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        elapsed = time.time() - start
-        return proc.returncode, proc.stdout, proc.stderr, elapsed
-    except subprocess.TimeoutExpired:
-        elapsed = time.time() - start
-        return -1, "", f"TIMEOUT after {timeout}s", elapsed
-
-
-def _decision_matches(exp: dict, got: dict) -> list:
-    """Return list of failures (empty if match)."""
+def evaluate(scenario: Dict[str, Any], result: Dict[str, Any]) -> List[str]:
+    """Return the list of failures (empty = pass)."""
+    decisions = result["agent_decisions"]
+    if decisions is None:
+        return [f"no parseable agent output; alerts={result['record']['alerts']}"]
     fails = []
-    for k, v in exp.items():
-        if k == "any_coin":
-            # Global actions (REDEEM_ALL, NO_NEW_POSITIONS) are
-            # valid without a coin field.
-            if v and not got.get("coin"):
-                action = got.get("action", "")
-                if action not in ("REDEEM_ALL", "NO_NEW_POSITIONS", "ALERT_ONLY"):
-                    fails.append(f"decision must have a coin field; got {got!r}")
-            continue
-        if k == "product_id_any":
-            if v and got.get("product_id") not in v and got.get("from_product_id") not in v:
-                fails.append(f"decision product_id/from_product_id must be in {v!r}; got {got!r}")
-            continue
-        if got.get(k) != v:
-            fails.append(f"decision.{k}: expected {v!r}, got {got.get(k)!r}")
+    stakes = sorted(str(d.get("product_id")) for d in decisions
+                    if isinstance(d, dict) and d.get("action") == "STAKE")
+    want = sorted(scenario["expect"]["stake"])
+    if stakes != want:
+        fails.append(f"STAKE product ids: expected {want}, got {stakes}")
     return fails
 
 
-def validate(parsed: dict, expected: dict) -> tuple[bool, list]:
-    """Check parsed output against expected; return (ok, list of failures)."""
-    fails = []
-    # 1. decisions match
-    exp_decisions = expected.get("decisions", [])
-    got_decisions = parsed.get("decisions", [])
-    if len(exp_decisions) != len(got_decisions):
-        fails.append(f"decisions count: expected {len(exp_decisions)}, "
-                     f"got {len(got_decisions)}")
-    else:
-        for i, (exp, got) in enumerate(zip(exp_decisions, got_decisions)):
-            fails.extend(_decision_matches(exp, got))
-    # 2. must_hold_reason_contains
-    holds_text = " ".join(parsed.get("holds", []))
-    for needle in expected.get("must_hold_reason_contains", []):
-        if needle not in holds_text:
-            fails.append(f"holds missing {needle!r}; got: {holds_text!r}")
-    # 3. risk_state echo
-    if "risk_state_echo" in expected:
-        if parsed.get("risk_state") != expected["risk_state_echo"]:
-            fails.append(f"risk_state: expected {expected['risk_state_echo']!r}, "
-                         f"got {parsed.get('risk_state')!r}")
-    # 4. must_alert_contain
-    alerts_text = " ".join(parsed.get("alerts", []))
-    for needle in expected.get("must_alert_contain", []):
-        if needle not in alerts_text:
-            fails.append(f"alerts missing {needle!r}; got: {alerts_text!r}")
-    return (len(fails) == 0, fails)
-
-
-def run_fixture(fixture: dict, prompt: str, cfg: dict, runs: int, timeout: int) -> dict:
-    """Run a single fixture N times, return pass/fail summary."""
-    full_prompt = compose_prompt(prompt, fixture)
-    passes = 0
-    failures = []
-    for run_idx in range(1, runs + 1):
-        exit_code, stdout, stderr, elapsed = call_hermes(full_prompt, cfg, timeout)
-        parsed = extract_json(stdout)
-        if parsed is None:
-            failures.append({"run": run_idx, "elapsed": elapsed,
-                             "error": "JSON parse failed",
-                             "stdout_head": stdout[:300],
-                             "stderr_head": stderr[:200]})
-            continue
-        ok, fails = validate(parsed, fixture["expected"])
-        if ok:
-            passes += 1
+def run_scenario(scenario, cfg, agent, runs: int) -> Dict[str, Any]:
+    passes, failures = 0, []
+    for i in range(1, runs + 1):
+        result = run_once(scenario, cfg, agent)
+        fails = evaluate(scenario, result)
+        if fails:
+            failures.append({"run": i, "fails": fails,
+                             "agent_decisions": result["agent_decisions"],
+                             "raw_head": (result["raw"] or "")[:400]})
         else:
-            failures.append({"run": run_idx, "elapsed": elapsed,
-                             "fails": fails, "parsed": parsed})
-    return {
-        "name": fixture["name"],
-        "description": fixture["description"],
-        "passes": passes,
-        "total": runs,
-        "failures": failures,
-    }
+            passes += 1
+    return {"name": scenario["name"], "description": scenario["description"],
+            "passes": passes, "total": runs, "failures": failures}
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=DEFAULT_RUNS)
-    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
-    ap.add_argument("--prompt", type=Path, default=None,
-                    help="default: prompt_<PROMPT_VERSION>.md from the production config")
-    ap.add_argument("--fixtures", default=None,
-                    help="comma-separated fixture names; default = all")
-    ap.add_argument("--out", type=Path,
-                    default=Path("/tmp/smoke/regression_results.json"))
-    args = ap.parse_args()
+    ap.add_argument("--fixtures", default=None, help="comma-separated names; default = all")
+    ap.add_argument("--out", type=Path, default=None, help="JSON report path")
+    args = ap.parse_args(argv)
 
-    # Model, reasoning and flags come from the production config (T1.10).
-    cfg = load_config(settings.config_file())
-    if args.prompt is None:
-        args.prompt = settings.ROOT / f"prompt_{cfg['PROMPT_VERSION']}.md"
-
-    if not args.prompt.exists():
-        print(f"FATAL: prompt file not found: {args.prompt}", file=sys.stderr)
-        return 2
-
-    prompt = args.prompt.read_text()
-
-    if args.fixtures:
-        names = [n.strip() for n in args.fixtures.split(",")]
-        fixtures = [get_fixture(n) for n in names]
-    else:
-        fixtures = ALL_FIXTURES
-
-    print(f"Running {len(fixtures)} fixtures × {args.runs} runs each "
-          f"= {len(fixtures) * args.runs} cycles\n", file=sys.stderr)
-
-    results = []
-    total_passes = 0
-    total_runs = 0
-    for fx in fixtures:
-        print(f"=== {fx['name']} ===", file=sys.stderr)
-        r = run_fixture(fx, prompt, cfg, args.runs, args.timeout)
-        status = "PASS" if r["passes"] == r["total"] else "FAIL"
-        print(f"  {status}: {r['passes']}/{r['total']}", file=sys.stderr)
-        if r["failures"]:
+    selected = ([get(n.strip()) for n in args.fixtures.split(",")]
+                if args.fixtures else scenarios())
+    with tempfile.TemporaryDirectory(prefix="yr-regression-") as tmp:
+        workdir = Path(tmp)
+        isolate(workdir)
+        cfg = regression_config(workdir)
+        print(f"model={cfg['RESOLVED_MODEL']} prompt=prompt_{cfg['PROMPT_VERSION']}.md "
+              f"cmd={' '.join(ryc.build_agent_command(cfg))}", file=sys.stderr)
+        results = []
+        for sc in selected:
+            r = run_scenario(sc, cfg, ryc.call_agent, args.runs)
+            print(f"{'PASS' if r['passes'] == r['total'] else 'FAIL'} "
+                  f"{r['passes']}/{r['total']}  {sc['name']}", file=sys.stderr)
             for f in r["failures"][:2]:
-                print(f"    run {f['run']}: {f.get('fails') or f.get('error')}",
-                      file=sys.stderr)
-        results.append(r)
-        total_passes += r["passes"]
-        total_runs += r["total"]
+                print(f"    run {f['run']}: {f['fails']}", file=sys.stderr)
+            results.append(r)
 
-    summary = {
-        "prompt": str(args.prompt),
-        "runs_per_fixture": args.runs,
-        "total_cycles": total_runs,
-        "total_passes": total_passes,
-        "pass_rate": round(total_passes / total_runs, 3) if total_runs else 0,
-        "fixtures": results,
-    }
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
-    print(f"\n=== SUMMARY: {total_passes}/{total_runs} cycles passed "
-          f"({summary['pass_rate']*100:.0f}%) ===", file=sys.stderr)
-    print(f"Detailed results -> {args.out}", file=sys.stderr)
-    return 0 if total_passes == total_runs else 1
+    total = sum(r["total"] for r in results)
+    passed = sum(r["passes"] for r in results)
+    report = {"model": cfg["RESOLVED_MODEL"], "prompt_version": cfg["PROMPT_VERSION"],
+              "runs_per_fixture": args.runs, "total": total, "passed": passed,
+              "fixtures": results}
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    print(f"=== {passed}/{total} passed ===", file=sys.stderr)
+    return 0 if passed == total else 1
 
 
 if __name__ == "__main__":

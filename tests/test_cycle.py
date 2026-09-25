@@ -381,21 +381,6 @@ def test_agent_command_is_exact(env, monkeypatch):
     assert "HERMES_RISK_HMAC_KEY" not in seen["kw"]["env"]
 
 
-def test_regression_uses_same_command(env, monkeypatch):
-    import run_regression
-    seen = {}
-
-    def fake_run(cmd, **kw):
-        seen["cmd"], seen["kw"] = cmd, kw
-        return _Proc()
-
-    monkeypatch.setattr(run_regression.subprocess, "run", fake_run)
-    cfg = load_cfg(env)
-    run_regression.call_hermes("p", cfg, timeout=5)
-    assert seen["cmd"] == ryc.build_agent_command(cfg)
-    assert seen["kw"]["input"] == "p"
-
-
 # =========================================================================== #
 # Phase 2 — execution path                                                     #
 # =========================================================================== #
@@ -613,3 +598,28 @@ def test_unwind_matches_coins_case_insensitively(env):
     tool = FakeBybit(positions=[position("1", coin="usdt", amount="5")])
     rec, _ = run(env, tool=tool, COIN_WHITELIST=["usdt"])
     assert [(r["product_id"], r["amount"]) for r in redeem_executions(rec)] == [("1", "5")]
+
+
+
+# --- T4.3: old LLM fixtures that are really wrapper behaviour -------------- #
+
+def test_invented_product_id_is_rejected(env):
+    """Old regression fixture 09: an id the wrapper never offered."""
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    invented = {**STAKE_1, "product_id": "999"}
+    rec, _ = run(env, agent=FakeAgent(reply_with(invented)))
+    assert any(a.startswith("CRITICAL") for a in rec["alerts"])
+    assert [e for e in rec["executions"] if e.get("would_call")] == []
+
+
+def test_stale_apr_history_is_filtered(env):
+    """Old regression fixture 06: the model never sees a stale product."""
+    from helpers import apr_history
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    agent = FakeAgent(reply_with(HOLD))
+    tool = FakeBybit(history=apr_history(newest_age_s=5 * 3600))
+    rec, _ = run(env, tool=tool, agent=agent)
+    assert any(f["reason"].startswith("STALE_HISTORY") for f in rec["filtered_by_wrapper"])
+    assert agent.called is False  # nothing to decide on
+    assert any(a.startswith("NO_ELIGIBLE_PRODUCTS") for a in rec["alerts"])
+    assert blocking_alerts(rec) == []  # transient: must not freeze the heartbeat

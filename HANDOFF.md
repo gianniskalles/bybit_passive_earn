@@ -30,6 +30,10 @@
 | `tests/test_cycle.py` | Tests του wrapper χωρίς LLM (πύλες, ποσά, REDEEM, prompt, JSON, εντολή agent). |
 | `tests/test_risk_state.py` | Tests του `risk_state.py`. |
 | `tests/test_data_integrity.py` | Tests της Φάσης 3 (πεδία, APR, κωδικοί, config, crash). |
+| `tests/run_regression.py` | LLM regression (μόνο VPS) πάνω στο `run_cycle` της παραγωγής. |
+| `tests/regression_fixtures.py`, `tests/replay.py`, `tests/data/` | Σενάρια regression, replay αποθηκευμένων απαντήσεων Bybit. |
+| `tests/test_regression_harness.py`, `tests/test_recorded_payloads.py` | Ότι το regression είναι η διαδρομή της παραγωγής· ότι οι καταγραφές αναλύονται σωστά. |
+| `scripts/testnet.py` | `capture` / `roundtrip` για το testnet (Φάση 6). |
 | `tests/test_bybit_tool.py` | Tests του Bybit client (place-order, υπογραφή, σφάλματα, testnet). |
 | `tests/test_portability.py` | Tests φορητότητας και προτεραιότητας `.env` (Φάση 0). |
 
@@ -169,6 +173,32 @@ state, source, ts, ...)`. Εγγραφές χωρίς `source` (παλιό σχ�
   πρέπει να είναι `null` όταν `DRY_RUN: false`. Αποτυχία → record με
   `CONFIG_INCOMPLETE`, exit 3.
 
+### Regression (Φάση 4)
+
+- **Δύο επίπεδα:**
+  - `pytest` — όλη η ντετερμινιστική συμπεριφορά (πύλες, παλαίωση, ποσά,
+    REDEEM, product ids, `extract_json`, config, crash), χωρίς LLM, σε
+    δευτερόλεπτα. Τα παλιά fixtures 02, 04–09 έγιναν wrapper tests· το 03
+    (tier cap) καταργήθηκε μαζί με το πεδίο.
+  - `tests/run_regression.py` — **μόνο ποιότητα απόφασης** με το πραγματικό
+    μοντέλο (STAKE όταν πρέπει, HOLD όταν πρέπει), 5 σενάρια ×
+    `--runs` (default 5). Τρέχει μόνο στο VPS.
+- **Ίδια διαδρομή με την παραγωγή:** το regression καλεί το
+  `run_cycle` με το `call_agent` της παραγωγής και το πραγματικό config·
+  τα δεδομένα Bybit είναι αποθηκευμένες απαντήσεις που περνούν από τον
+  πραγματικό `BybitEarnTool` (`tests/replay.py`). Το prompt είναι byte
+  προς byte αυτό της παραγωγής (test με spy στο `compose_prompt`).
+- **Δεδομένα:** σήμερα μόνο το `tests/data/SYNTHETIC_usdt_flexible.json`
+  (χειρόγραφο, σε σχήμα docs). Στο testnet: `scripts/testnet.py capture`
+  αποθηκεύει τις πραγματικές απαντήσεις στο `tests/data/` και το
+  `tests/test_recorded_payloads.py` κλειδώνει την ανάλυση πάνω τους·
+  `scripts/testnet.py roundtrip` κάνει Stake + Redeem και αποθηκεύει τα
+  πάντα (το test ελέγχει `orderId` και τελική κατάσταση Success). Και τα
+  δύο αρνούνται να τρέξουν χωρίς `BYBIT_TESTNET=1`.
+- `NO_ELIGIBLE_PRODUCTS` (μη-εμποδιστικό): κανένα προϊόν δεν πέρασε τα
+  φίλτρα (π.χ. παλιό APR history). Πριν τη Φάση 3 αυτό έγραφε
+  `CONFIG_INCOMPLETE` και πάγωνε το heartbeat για κάτι παροδικό.
+
 ### Ποσά (T1.5)
 
 Το LLM δεν δίνει ποσό (prompt v6). Ο wrapper:
@@ -231,9 +261,8 @@ pytest            # από τη ρίζα του repo — οπουδήποτε, �
     `cycle_id` του κύκλου.
   - Εντολή agent: `hermes chat --query-file /dev/stdin -Q --toolsets= -m
     <RESOLVED_MODEL> --reasoning <...>` — prompt από stdin, χωρίς tools.
-- ⚠️ **Το prompt v6 δεν έχει δοκιμαστεί με το πραγματικό μοντέλο.** Το LLM
-  regression χρειάζεται τον agent στο VPS· τα fixtures είναι ακόμα σε
-  σχήμα v5 (`amount_usd`, `from_product_id`) και ξαναγράφονται στη Φάση 4.
+- ⚠️ **Το prompt v6 δεν έχει δοκιμαστεί με το πραγματικό μοντέλο.** Βήμα
+  του `DEPLOY.md`, πριν το επταήμερο dry-run.
 - ✅ **Φάση 2 — Διαδρομή εκτέλεσης** (T2.1–T2.5), K5, K16, μέρος K20.
 - ⚠️ **Προς επιβεβαίωση στο testnet** (δεν υπάρχουν καταγεγραμμένα
   payloads Bybit στο repo): ότι το `/v5/earn/product` δίνει `precision` και
@@ -244,7 +273,8 @@ pytest            # από τη ρίζα του repo — οπουδήποτε, �
 - 📝 Για το `DEPLOY.md`: LLM regression του v6 με το πραγματικό μοντέλο στο
   VPS, **πριν** το επταήμερο dry-run.
 - ✅ **Φάση 3 — Ακεραιότητα δεδομένων** (T3.1–T3.7), K13, K14.
-- Εκκρεμούν οι Φάσεις 4–5 (K12, K19, K20 υπόλοιπο).
+- ✅ **Φάση 4 — Regression που μετράει την παραγωγή** (T4.1–T4.4), K12.
+- Εκκρεμεί η Φάση 5 (K19, K20 υπόλοιπο).
 
 ## 7. Εκκρεμότητες / TODO για την επόμενη συνεδρία
 
@@ -259,4 +289,4 @@ pytest            # από τη ρίζα του repo — οπουδήποτε, �
 
 ---
 
-_Τελευταία ενημέρωση: Φάση 3 του FINISH_PLAN (ακεραιότητα δεδομένων)_
+_Τελευταία ενημέρωση: Φάση 4 του FINISH_PLAN (regression)_

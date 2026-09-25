@@ -919,6 +919,8 @@ def _cycle(cfg: Dict[str, Any], tool, agent: Agent, cycle_id: str, rec: Dict[str
         return 0
 
     if not scan and not positions and not data_errors:
+        # Transient (e.g. stale APR history) — visible, but non-blocking.
+        alerts.append("NO_ELIGIBLE_PRODUCTS: no whitelisted product survived filtering")
         rec["decisions"] = [{"action": "HOLD", "reason": "no whitelisted product survived filtering"}]
         return 0
 
