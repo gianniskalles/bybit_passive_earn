@@ -17,9 +17,13 @@ the JSON block at the end of this message:
   called.)
 - `balances`: idle balance per coin (`wallet_balance`).
 - `positions`: currently staked positions, each with `product_id`, `coin`,
-  `amount`, `status`.
-- `scan`: products that passed the wrapper's filters (coin whitelist,
-  status `Available`, fresh APR history).
+  `amount`, `status`, and the product's current `product_status` and
+  `redemption_eta_hours`.
+- `scan`: products that passed the wrapper's filters: coin whitelist,
+  status `Available`, no tiered APR, known redemption time within
+  `MAX_REDEMPTION_ETA_HOURS`, fresh APR history with at least 6 points in
+  the last 24 h. Each has `estimate_apr` (Bybit's current rate) and
+  `apr_ma_24h` (its 24 h mean).
 
 **Absolute rules**
 
@@ -59,7 +63,7 @@ the JSON block at the end of this message:
 | Check | Condition |
 |---|---|
 | Rate is a trend, not a spike | `apr_ma_24h >= ENTRY_APR` |
-| Current rate qualifies | `marginal_apr_for_size >= ENTRY_APR` |
+| Current rate qualifies | `estimate_apr >= ENTRY_APR` |
 | Product open | `status == "Available"` and `remaining_capacity` is null or > 0 |
 | Liquid | `redemption_eta_hours <= MAX_REDEMPTION_ETA_HOURS` |
 | Idle capital exists | `balances[coin].wallet_balance > RESERVE_USD` |
@@ -70,10 +74,16 @@ skip the order if the size is below the product minimum.
 
 **REDEEM** — for a product in `positions` when any holds:
 
-- `apr_ma_24h < EXIT_APR`
-- `marginal_apr_for_size < EXIT_APR`
-- `status != "Available"`, or the product is missing from `scan`
-- `redemption_eta_hours > MAX_REDEMPTION_ETA_HOURS`
+- the product is in `scan` and `apr_ma_24h < EXIT_APR`
+- the product is in `scan` and `estimate_apr < EXIT_APR`
+- the position's `product_status != "Available"` (the wrapper also
+  redeems these on its own)
+- the position's `redemption_eta_hours > MAX_REDEMPTION_ETA_HOURS`
+
+A product missing from `scan` is not by itself a reason to REDEEM — the
+wrapper may have filtered it only because its APR history is stale. A
+`null` `redemption_eta_hours` on a position is unknown, not long: HOLD and
+add an alert.
 
 A REDEEM always closes the whole position; the wrapper takes the amount
 from `positions`.
@@ -91,7 +101,7 @@ appear in your output:
       "action": "STAKE",
       "coin": "USDT",
       "product_id": "EXAMPLE",
-      "reason": "apr_ma_24h 0.0198 >= ENTRY_APR 0.001; marginal 0.021 >= ENTRY_APR 0.001; eta 0.0 <= 2; wallet_balance 100 > RESERVE_USD 0"
+      "reason": "apr_ma_24h 0.0198 >= ENTRY_APR 0.001; estimate_apr 0.021 >= ENTRY_APR 0.001; eta 0.0 <= 2; wallet_balance 100 > RESERVE_USD 0"
     }
   ],
   "holds": ["USDT EXAMPLE: apr_ma_24h 0.0005 < ENTRY_APR 0.001"],

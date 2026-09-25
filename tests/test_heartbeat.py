@@ -437,4 +437,5 @@ def test_blocking_codes_are_exact():
     # Rule 8: any change here must come with the wrapper change that motivates it.
     assert set(heartbeat.BLOCKING_CODES) == {
         "CONFIG_INCOMPLETE", "CRITICAL", "AGENT_PARSE_ERROR", "DECISION_VALIDATION_FAILED",
+        "CYCLE_CRASH",
     }

@@ -32,9 +32,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
@@ -50,17 +52,21 @@ from executor import Executor
 
 ROOT = settings.ROOT
 
-STALE_SNAPSHOT_MS = 4 * 60 * 60 * 1000  # 4 h — Bybit USDT APR history refresh
+APR_WINDOW_MS = 24 * 60 * 60 * 1000
+MIN_APR_POINTS = 6  # fewer points in the 24 h window -> apr_ma_24h is null
 JSONL_FILE = "{date}.jsonl"  # LOG_DIR / jsonl template
 CYCLE_LATENCY_ALERT_S = 300
 AGENT_TIMEOUT_S = 280
 
 AGENT_ACTIONS = ("STAKE", "REDEEM", "REDEEM_ALL", "HOLD", "ALERT_ONLY",
                  "NO_NEW_POSITIONS", "REJECTED_CROSS_COIN")
-MANDATORY_PARAMS = ["ENTRY_APR", "RESOLVED_MODEL", "ACCOUNT_TYPE"]
 # Bybit Earn order statuses that are final (compared case-insensitively);
 # anything else — including a missing or unknown status — counts as pending.
 FINAL_ORDER_STATUSES = ("success", "fail")
+
+class AgentTimeout(RuntimeError):
+    """`hermes chat` did not answer within AGENT_TIMEOUT_S."""
+
 
 # (raw_stdout, session_id) = agent(prompt, cfg, cycle_id)
 Agent = Callable[[str, Dict[str, Any], str], Tuple[str, Optional[str]]]
@@ -71,10 +77,63 @@ Agent = Callable[[str, Dict[str, Any], str], Tuple[str, Optional[str]]]
 # --------------------------------------------------------------------------- #
 
 def load_config(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        raise SystemExit(f"config not found: {path}")
-    with path.open() as f:
-        return yaml.safe_load(f)
+    """Parse the YAML config. Raises OSError / yaml.YAMLError / ValueError."""
+    with Path(path).open() as f:
+        cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"{path}: top level is not a mapping")
+    return cfg
+
+
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _nonempty_str(v: Any) -> bool:
+    return isinstance(v, str) and bool(v.strip())
+
+
+# field -> (check, description). Every field is required.
+CONFIG_SCHEMA: Dict[str, Tuple[Callable[[Any], bool], str]] = {
+    "ACCOUNT_TYPE": (_nonempty_str, "non-empty string"),
+    "COIN_WHITELIST": (lambda v: isinstance(v, list) and bool(v) and all(map(_nonempty_str, v)),
+                       "non-empty list of coin strings"),
+    "CYCLE_INTERVAL_MINUTES": (lambda v: _is_num(v) and v > 0, "number > 0"),
+    "DRY_RUN": (lambda v: isinstance(v, bool), "boolean"),
+    "ENTRY_APR": (lambda v: _is_num(v) and 0 <= v < 1, "number in [0, 1)"),
+    "EXIT_APR": (lambda v: _is_num(v) and 0 <= v < 1, "number in [0, 1)"),
+    "MIN_APR_EDGE": (lambda v: _is_num(v) and 0 <= v < 1, "number in [0, 1)"),
+    "LOG_DIR": (_nonempty_str, "non-empty path"),
+    "MAX_PER_PRODUCT_USD": (lambda v: _is_num(v) and v > 0, "number > 0"),
+    "MAX_REDEMPTION_ETA_HOURS": (lambda v: _is_num(v) and v >= 0, "number >= 0"),
+    "MIN_MOVE_USD": (lambda v: _is_num(v) and v >= 0, "number >= 0"),
+    "RESERVE_USD": (lambda v: _is_num(v) and v >= 0, "number >= 0"),
+    "PROMPT_VERSION": (lambda v: isinstance(v, str) and re.fullmatch(r"v\d+", v) is not None,
+                       "string like v6"),
+    "REQUESTED_REASONING": (_nonempty_str, "non-empty string"),
+    "RESOLVED_MODEL": (_nonempty_str, "non-empty string"),
+    "MAX_SCAN_AGE_SECONDS": (lambda v: _is_num(v) and v > 0, "number > 0"),
+    "MAX_APR_HISTORY_GAP_HOURS": (lambda v: _is_num(v) and v > 0, "number > 0"),
+}
+
+
+def validate_config(cfg: Any) -> List[str]:
+    """Return a list of problems; [] = the whole config is usable (T3.6)."""
+    if not isinstance(cfg, dict):
+        return ["config: not a mapping"]
+    issues = []
+    for field, (check, desc) in CONFIG_SCHEMA.items():
+        if field not in cfg or cfg[field] is None:
+            issues.append(f"{field}: missing")
+        elif not check(cfg[field]):
+            issues.append(f"{field}: {cfg[field]!r} is not a {desc}")
+    sim = cfg.get("SIMULATED_IDLE_BALANCE")
+    if sim is not None and not (_is_num(sim) and sim >= 0):
+        issues.append(f"SIMULATED_IDLE_BALANCE: {sim!r} is not null or a number >= 0")
+    elif sim is not None and cfg.get("DRY_RUN") is False:
+        # Never pretend to have fake capital while moving real funds.
+        issues.append("SIMULATED_IDLE_BALANCE: must be null when DRY_RUN is false")
+    return issues
 
 
 def prompt_path(cfg: Dict[str, Any]) -> Path:
@@ -142,6 +201,7 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     scan: List[Dict] = []
     product_status: Dict[str, Any] = {}
+    product_info: Dict[str, Dict[str, Any]] = {}
     for p in products:
         coin = _norm_coin(p.get("coin"))
         if coin not in whitelist:
@@ -158,9 +218,26 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
                              "reason": f"PARSE_ERROR: estimateApr={est_str!r}"})
             continue
 
+        minutes = _opt_float(p.get("redeemProcessingMinute"))
+        eta_hours = minutes / 60 if minutes is not None and minutes >= 0 else None
+        product_info[product_id] = {"status": status, "redemption_eta_hours": eta_hours}
+
         if status != "Available":
             filtered.append({"product_id": product_id,
                              "reason": f"STATUS_NOT_AVAILABLE: {status!r}"})
+            continue
+        if bool(p.get("hasTieredApr", False)):
+            # The rate at our size is not what estimateApr says; unknown.
+            filtered.append({"product_id": product_id, "reason": "TIERED_APR_UNCERTAIN"})
+            continue
+        if eta_hours is None:
+            filtered.append({"product_id": product_id,
+                             "reason": "REDEMPTION_ETA_UNKNOWN: redeemProcessingMinute missing"})
+            continue
+        if eta_hours > cfg["MAX_REDEMPTION_ETA_HOURS"]:
+            filtered.append({"product_id": product_id,
+                             "reason": f"ILLIQUID: redemption_eta_hours {eta_hours} > "
+                                       f"MAX_REDEMPTION_ETA_HOURS {cfg['MAX_REDEMPTION_ETA_HOURS']}"})
             continue
 
         try:
@@ -168,15 +245,16 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
         except BybitAPIError as e:
             filtered.append({"product_id": product_id, "reason": f"APR_HISTORY_UNAVAILABLE: {e}"})
             continue
-        if not hist:
+        points = _apr_points(hist)
+        if not points:
             filtered.append({"product_id": product_id, "reason": "NO_APR_HISTORY"})
             continue
         # Two DISTINCT staleness checks: APR-history age here (hours,
         # MAX_APR_HISTORY_GAP_HOURS); live-scan age at decision time
         # (seconds, MAX_SCAN_AGE_SECONDS).
-        latest_ts = max(int(h.get("timestamp", 0)) for h in hist)
+        latest_ts = points[-1][0]
         apr_history_age_seconds = (snapshot_ts - latest_ts) // 1000
-        max_gap_hours = cfg.get("MAX_APR_HISTORY_GAP_HOURS", 4)
+        max_gap_hours = cfg["MAX_APR_HISTORY_GAP_HOURS"]
         if apr_history_age_seconds > max_gap_hours * 3600:
             filtered.append({
                 "product_id": product_id,
@@ -184,9 +262,10 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
             })
             continue
 
-        apr_ma_24h = _apr_ma_24h(hist)
+        apr_ma_24h = _apr_ma_24h(points, snapshot_ts)
         if apr_ma_24h is None:
-            filtered.append({"product_id": product_id, "reason": "NO_APR_MA_24H"})
+            filtered.append({"product_id": product_id,
+                             "reason": f"NO_APR_MA_24H: fewer than {MIN_APR_POINTS} points in 24 h"})
             continue
 
         remaining = _opt_float(p.get("remainingPoolAmount"))
@@ -199,15 +278,9 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
             "min_stake_amount": _opt_float(p.get("minStakeAmount")),
             "max_stake_amount": _opt_float(p.get("maxStakeAmount")),
             "precision": _opt_int(p.get("precision")),
-            "has_tiered_apr": bool(p.get("hasTieredApr", False)),
             # Bybit returns -1 for an unlimited pool -> null (no pool limit).
             "remaining_capacity": None if remaining is not None and remaining < 0 else remaining,
-            "tier_cap_amount": None,  # Bybit doesn't expose this in /v5/earn/product
-            "redemption_eta_hours": 0.0,  # FlexibleSaving is T+0
-            "apr_ma_7d": apr_ma_24h,  # we only keep 24h; 7d = 24h best-effort
-            "apr_p25_180d": None,  # 180d history not exposed by API
-            "apr_p75_180d": None,  # 180d history not exposed by API
-            "marginal_apr_for_size": est_apr,  # = estimate_apr (no tier effect at our size)
+            "redemption_eta_hours": eta_hours,
             "apr_history_age_seconds": apr_history_age_seconds,
         })
 
@@ -240,11 +313,14 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
                 if pid is None or amount is None or amount < 0:
                     # Counting it as 0 would let the per-product cap be exceeded.
                     raise BybitAPIError(f"unreadable position {p!r}")
+                info = product_info.get(pid, {})
                 positions.append({
                     "product_id": pid,
                     "coin": _norm_coin(p.get("coin")) or coin,
                     "amount": amount,
                     "status": p.get("status"),
+                    "product_status": info.get("status"),
+                    "redemption_eta_hours": info.get("redemption_eta_hours"),
                 })
     except BybitAPIError as e:
         data_errors["positions"] = str(e)
@@ -291,11 +367,12 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "product_fetch_ts_ms": product_fetch_ts_ms,
         "account_type": cfg["ACCOUNT_TYPE"],
         "balance_source": balance_source,
-        "stale_threshold_ms": STALE_SNAPSHOT_MS,
+        "apr_history_max_gap_hours": cfg["MAX_APR_HISTORY_GAP_HOURS"],
     }
     return {"scan": scan, "positions": positions, "balances": balances_summary,
             "filtered": filtered, "snapshot_meta": snapshot_meta,
             "idle_per_coin": real_idle_per_coin, "product_status": product_status,
+            "product_info": product_info,
             "orders": orders, "pending_coins": sorted(pending_coins),
             "pending_stakes": pending_stakes, "pending_unmatched": pending_unmatched,
             "data_errors": data_errors}
@@ -368,10 +445,7 @@ def call_agent(prompt: str, cfg: Dict[str, Any], cycle_id: str) -> Tuple[str, Op
         proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
                               timeout=AGENT_TIMEOUT_S, env=env)
     except subprocess.TimeoutExpired as e:
-        partial = e.stdout or ""
-        if isinstance(partial, bytes):
-            partial = partial.decode("utf-8", errors="replace")
-        return partial, session_id
+        raise AgentTimeout(f"no answer within {AGENT_TIMEOUT_S}s") from e
     raw = proc.stdout or ""
     if proc.returncode != 0 and not raw.strip():
         raise RuntimeError(
@@ -722,29 +796,47 @@ def _parse_pct(s: str) -> float:
     return float(s)
 
 
-def _apr_ma_24h(hist: List[Dict]) -> Optional[float]:
-    """Last 24 hourly points → simple mean."""
-    recents = []
-    for h in hist[-24:]:
-        v = h.get("apr", "0")
-        try:
-            recents.append(_parse_pct(v))
-        except ValueError:
+def _apr_points(hist: List[Dict]) -> List[Tuple[int, float]]:
+    """(timestamp_ms, apr) for every parseable point, sorted by time.
+    Bybit's ordering is never assumed."""
+    points = []
+    for h in hist:
+        if not isinstance(h, dict):
             continue
-    if not recents:
+        ts, apr = _opt_float(h.get("timestamp")), h.get("apr")
+        try:
+            value = _parse_pct(apr) if isinstance(apr, str) else None
+        except ValueError:
+            value = None
+        if ts is not None and value is not None:
+            points.append((int(ts), value))
+    return sorted(points)
+
+
+def _apr_ma_24h(points: List[Tuple[int, float]], now_ms: int) -> Optional[float]:
+    """Mean APR over the 24 h time window ending now; null with fewer than
+    MIN_APR_POINTS points in it."""
+    window = [v for ts, v in points if now_ms - APR_WINDOW_MS < ts <= now_ms]
+    if len(window) < MIN_APR_POINTS:
         return None
-    return sum(recents) / len(recents)
+    return sum(window) / len(window)
 
 
 # --------------------------------------------------------------------------- #
 # The cycle                                                                   #
 # --------------------------------------------------------------------------- #
 
-def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dict, int]:
-    """Run one cycle, write its decision record, return (record, exit_code)."""
+def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent,
+              config_error: Optional[str] = None) -> Tuple[Dict, int]:
+    """Run one cycle, write its decision record, return (record, exit_code).
+
+    Exit codes: 0 ok, 3 config problem (CONFIG_INCOMPLETE), 4 unexpected
+    exception (CYCLE_CRASH). A record is written in every case (T3.7).
+    """
     cycle_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     cycle_start = time.monotonic()
-    log_dir = Path(cfg.get("LOG_DIR") or settings.default_log_dir())
+    cfg = cfg if isinstance(cfg, dict) else {}
+    log_dir = Path(cfg["LOG_DIR"]) if _nonempty_str(cfg.get("LOG_DIR")) else settings.default_log_dir()
     alerts: List[str] = []
     rec: Dict[str, Any] = {
         "ts": _now(),
@@ -770,33 +862,40 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
         "data_errors": {},
     }
 
-    def finish(rc: int) -> Tuple[Dict, int]:
-        rec["cycle_duration_seconds"] = round(time.monotonic() - cycle_start, 3)
-        if rec["cycle_duration_seconds"] > CYCLE_LATENCY_ALERT_S:
-            alerts.append(f"CYCLE_LATENCY_HIGH: cycle took {rec['cycle_duration_seconds']}s "
-                          f"(> {CYCLE_LATENCY_ALERT_S}s); will start losing cycles silently")
-        write_decision_log(log_dir, rec)
-        return rec, rc
+    try:
+        rc = _cycle(cfg, tool, agent, cycle_id, rec, alerts, config_error)
+    except Exception as e:
+        # Never die silently: the record carries the crash and blocks the heartbeat.
+        alerts.append(f"CYCLE_CRASH: {type(e).__name__}: {e}")
+        rec["crash"] = traceback.format_exc(limit=8)
+        rec["decisions"] = rec.get("decisions") or [{"action": "ALERT_ONLY", "reason": "cycle crashed"}]
+        rc = 4
 
-    # Required config -> hard fail before anything else.
-    for param in MANDATORY_PARAMS:
-        if cfg.get(param) is None:
-            alerts.extend([f"CONFIG_INCOMPLETE: '{param}' is null", "CRITICAL"])
-            rec["decisions"] = [{"action": "ALERT_ONLY",
-                                 "reason": f"CRITICAL: Required config parameter '{param}' is null or missing"}]
-            return finish(3)
+    rec["cycle_duration_seconds"] = round(time.monotonic() - cycle_start, 3)
+    if rec["cycle_duration_seconds"] > CYCLE_LATENCY_ALERT_S:
+        alerts.append(f"CYCLE_LATENCY_HIGH: cycle took {rec['cycle_duration_seconds']}s "
+                      f"(> {CYCLE_LATENCY_ALERT_S}s); will start losing cycles silently")
+    write_decision_log(log_dir, rec)
+    return rec, rc
+
+
+def _cycle(cfg: Dict[str, Any], tool, agent: Agent, cycle_id: str, rec: Dict[str, Any],
+           alerts: List[str], config_error: Optional[str]) -> int:
+    """The cycle body; fills `rec`/`alerts` in place and returns the exit code."""
+    # Whole config validated before anything else (T3.6).
+    issues = ([f"config unreadable: {config_error}"] if config_error else []) + validate_config(cfg)
+    if issues:
+        alerts.extend(f"CONFIG_INCOMPLETE: {i}" for i in issues)
+        alerts.append("CRITICAL")
+        rec["decisions"] = [{"action": "ALERT_ONLY", "reason": "CRITICAL: invalid config; nothing runs"}]
+        return 3
 
     # Risk state: never terminates the cycle (T1.2).
     effective, risk_meta, risk_alerts = resolve_risk_state()
     rec["risk_state"], rec["risk_state_meta"] = effective, risk_meta
     alerts.extend(risk_alerts)
 
-    try:
-        data = collect_inputs(tool, cfg)
-    except Exception as e:
-        alerts.append("CONFIG_INCOMPLETE: data collection error")
-        rec["decisions"] = [{"action": "ALERT_ONLY", "reason": f"data collection failed: {e}"}]
-        return finish(2)
+    data = collect_inputs(tool, cfg)
     scan, positions = data["scan"], data["positions"]
     data_errors = data["data_errors"]
     rec["filtered_by_wrapper"] = data["filtered"]
@@ -817,12 +916,11 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
         # no orders this cycle (non-blocking; the next cycle retries).
         rec["decisions"] = [{"action": "ALERT_ONLY",
                              "reason": "positions unavailable; no orders this cycle"}]
-        return finish(0)
+        return 0
 
     if not scan and not positions and not data_errors:
-        alerts.append("CONFIG_INCOMPLETE: no products in COIN_WHITELIST survived filtering")
-        rec["decisions"] = [{"action": "HOLD", "reason": "no whitelisted products available"}]
-        return finish(0)
+        rec["decisions"] = [{"action": "HOLD", "reason": "no whitelisted product survived filtering"}]
+        return 0
 
     if effective == "UNWIND":
         # The kill switch does not depend on a model.
@@ -832,20 +930,24 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
         if not path.is_file():
             alerts.extend([f"CONFIG_INCOMPLETE: prompt file {path.name} not found", "CRITICAL"])
             rec["decisions"] = [{"action": "ALERT_ONLY", "reason": f"prompt file {path.name} missing"}]
-            return finish(3)
+            return 3
         template = path.read_bytes()
         rec["prompt_file"] = path.name
         rec["prompt_sha256"] = hashlib.sha256(template).hexdigest()
-        prompt = compose_prompt(template.decode("utf-8"), cycle_id, cfg, effective, risk_meta,
+        prompt = compose_prompt(template.decode("utf-8"), cycle_id, cfg, effective, rec["risk_state_meta"],
                                 scan, data["balances"], positions, list(alerts))
 
         rec["agent_called"] = True
+        fallback = {"decisions": [{"action": "ALERT_ONLY", "reason": "no usable agent output"}]}
         try:
             raw, rec["session_id"] = agent(prompt, cfg, cycle_id)
             agent_out = extract_json(raw, cycle_id)
-        except Exception as e:
+        except AgentTimeout as e:
+            alerts.append(f"AGENT_TIMEOUT: {e}")
+            agent_out = fallback
+        except (ValueError, RuntimeError, OSError) as e:
             alerts.append(f"AGENT_PARSE_ERROR: {e}")
-            agent_out = {"decisions": [{"action": "ALERT_ONLY", "reason": "agent output unparseable"}]}
+            agent_out = fallback
 
         issues = validate_decision_record(agent_out)
         if issues:
@@ -871,7 +973,7 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
                 break
 
         # Live-scan age (MAX_SCAN_AGE_SECONDS) at decision time.
-        max_scan_age_sec = cfg.get("MAX_SCAN_AGE_SECONDS", 900)
+        max_scan_age_sec = cfg["MAX_SCAN_AGE_SECONDS"]
         scan_age_seconds = (int(time.time() * 1000) - data["snapshot_meta"]["product_fetch_ts_ms"]) // 1000
         if scan_age_seconds > max_scan_age_sec:
             alerts.append(f"STALE_SCAN: live scan age {scan_age_seconds}s > {max_scan_age_sec}s threshold")
@@ -892,11 +994,11 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
                                  data["pending_coins"], data["pending_stakes"],
                                  block_all=bool(data["pending_unmatched"]))
     rec["plan"] = orders
-    executor = Executor(bybit_tool=tool, dry_run=cfg.get("DRY_RUN", True),
+    executor = Executor(bybit_tool=tool, dry_run=cfg["DRY_RUN"],
                         allow_new_positions=allow_new_positions,
                         account_type=cfg["ACCOUNT_TYPE"], cycle_id=cycle_id)
     rec["executions"] = executor.execute(orders) + skipped
-    return finish(0)
+    return 0
 
 
 def main():
@@ -906,19 +1008,15 @@ def main():
                         help="override config DRY_RUN and force dry-run")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    config_error = None
+    try:
+        cfg = load_config(args.config)
+    except (OSError, ValueError, yaml.YAMLError) as e:
+        cfg, config_error = {}, f"{type(e).__name__}: {e}"
     if args.dry_run:
         cfg["DRY_RUN"] = True
 
-    # Safety check: SIMULATED_IDLE_BALANCE + DRY_RUN=false is forbidden.
-    if not cfg.get("DRY_RUN", True) and cfg.get("SIMULATED_IDLE_BALANCE") is not None:
-        raise SystemExit(
-            "CRITICAL: SIMULATED_IDLE_BALANCE is set but DRY_RUN=false. "
-            "Clear SIMULATED_IDLE_BALANCE before going live, or the cycle "
-            "will pretend to have fake capital while moving real funds."
-        )
-
-    rec, rc = run_cycle(cfg, tool=BybitEarnTool(), agent=call_agent)
+    rec, rc = run_cycle(cfg, tool=BybitEarnTool(), agent=call_agent, config_error=config_error)
     print(f"[run_yield_cycle] cycle_id={rec['cycle_id']}")
     print(json.dumps(rec, ensure_ascii=False, indent=2))
     sys.exit(rc)

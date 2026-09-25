@@ -29,6 +29,7 @@
 | `tests/test_heartbeat.py` | Tests του heartbeat (decision table, bootstrap, ανθεκτικότητα). |
 | `tests/test_cycle.py` | Tests του wrapper χωρίς LLM (πύλες, ποσά, REDEEM, prompt, JSON, εντολή agent). |
 | `tests/test_risk_state.py` | Tests του `risk_state.py`. |
+| `tests/test_data_integrity.py` | Tests της Φάσης 3 (πεδία, APR, κωδικοί, config, crash). |
 | `tests/test_bybit_tool.py` | Tests του Bybit client (place-order, υπογραφή, σφάλματα, testnet). |
 | `tests/test_portability.py` | Tests φορητότητας και προτεραιότητας `.env` (Φάση 0). |
 
@@ -81,7 +82,7 @@ timestamp, και **ο επόμενος κύκλος τρέχει κανονικ
 | Οτιδήποτε άλλο (operator, `UNWIND`, bootstrap χωρίς κύκλο) | ABSTAIN (+ alert αν παλιό) |
 
 `BLOCKING_CODES` = `CONFIG_INCOMPLETE`, `CRITICAL`, `AGENT_PARSE_ERROR`,
-`DECISION_VALIDATION_FAILED`. Το `CYCLE_MODEL_MISMATCH` καταργήθηκε (T1.9).
+`DECISION_VALIDATION_FAILED`, `CYCLE_CRASH`. Το `CYCLE_MODEL_MISMATCH` καταργήθηκε (T1.9).
 
 ### Risk state στον wrapper
 
@@ -136,6 +137,37 @@ state, source, ts, ...)`. Εγγραφές χωρίς `source` (παλιό σχ�
 - **Testnet:** `BYBIT_TESTNET=1` → `https://api-testnet.bybit.com`.
 - Το `bybit_earn_tool.py` CLI είναι πλέον μόνο για ανάγνωση (`--health`,
   `--products`, `--positions`, `--orders`, `--apr-history`, `--balance`).
+
+### Δεδομένα και κωδικοί (Φάση 3)
+
+- **Μόνο πραγματικά πεδία στο scan.** Αφαιρέθηκαν `apr_ma_7d`,
+  `apr_p25_180d`, `apr_p75_180d`, `tier_cap_amount`,
+  `marginal_apr_for_size`. Το prompt χρησιμοποιεί `estimate_apr`.
+- `redemption_eta_hours = redeemProcessingMinute / 60`, `null` αν λείπει.
+  Εκτός scan (για STAKE): tiered APR (`TIERED_APR_UNCERTAIN`), άγνωστο ETA
+  (`REDEMPTION_ETA_UNKNOWN`), ETA > `MAX_REDEMPTION_ETA_HOURS` (`ILLIQUID`).
+  Τα positions φέρουν `product_status` και `redemption_eta_hours` του
+  προϊόντος τους, ώστε το LLM να βλέπει τη ρευστότητα των θέσεων.
+- **APR history** ανά `productId`, ταξινομημένο κατά `timestamp`, μέσος όρος
+  στο χρονικό παράθυρο 24 ωρών έως τώρα· `null` με λιγότερα από 6 σημεία.
+- **Κωδικοί:**
+
+| Κωδικός | Εμποδιστικός; | Πότε |
+|---|---|---|
+| `CONFIG_INCOMPLETE` | ναι | config άκυρο/μη αναγνώσιμο, prompt λείπει |
+| `CRITICAL` | ναι | συνοδεύει τα παραπάνω· product id εκτός scan/positions |
+| `AGENT_PARSE_ERROR` | ναι | έξοδος agent χωρίς αντικείμενο για τον κύκλο |
+| `DECISION_VALIDATION_FAILED` | ναι | έξοδος agent εκτός σχήματος |
+| `CYCLE_CRASH` | ναι | οποιαδήποτε απρόβλεπτη εξαίρεση (record με traceback, exit 4) |
+| `AGENT_TIMEOUT` | όχι | ο agent δεν απάντησε σε 280 s |
+| `DATA_UNAVAILABLE` | όχι | αποτυχία ανάγνωσης από Bybit |
+| `RISK_STATE_*`, `RISK_GATE_*`, `DATA_GATE_*`, `PENDING_*`, `STALE_SCAN`, `CYCLE_LATENCY_HIGH` | όχι | — |
+
+- **Config (T3.6):** όλα τα πεδία του `config/yield_rotation.yaml` είναι
+  υποχρεωτικά και ελέγχονται σε τύπο και εύρος (`CONFIG_SCHEMA` στο
+  `run_yield_cycle.py`) πριν από οτιδήποτε άλλο· `SIMULATED_IDLE_BALANCE`
+  πρέπει να είναι `null` όταν `DRY_RUN: false`. Αποτυχία → record με
+  `CONFIG_INCOMPLETE`, exit 3.
 
 ### Ποσά (T1.5)
 
@@ -211,7 +243,8 @@ pytest            # από τη ρίζα του repo — οπουδήποτε, �
   STAKE, `DATA_UNAVAILABLE` ή λόγος στο `executions[].reason`).
 - 📝 Για το `DEPLOY.md`: LLM regression του v6 με το πραγματικό μοντέλο στο
   VPS, **πριν** το επταήμερο dry-run.
-- Εκκρεμούν οι Φάσεις 3–5 (K12–K14, K17 μέρος, K19, K20 υπόλοιπο).
+- ✅ **Φάση 3 — Ακεραιότητα δεδομένων** (T3.1–T3.7), K13, K14.
+- Εκκρεμούν οι Φάσεις 4–5 (K12, K19, K20 υπόλοιπο).
 
 ## 7. Εκκρεμότητες / TODO για την επόμενη συνεδρία
 
@@ -226,4 +259,4 @@ pytest            # από τη ρίζα του repo — οπουδήποτε, �
 
 ---
 
-_Τελευταία ενημέρωση: Φάση 2 του FINISH_PLAN (διαδρομή εκτέλεσης)_
+_Τελευταία ενημέρωση: Φάση 3 του FINISH_PLAN (ακεραιότητα δεδομένων)_

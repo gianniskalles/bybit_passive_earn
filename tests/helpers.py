@@ -20,11 +20,13 @@ NOW_MS = lambda: int(time.time() * 1000)  # noqa: E731
 
 
 def product(pid="1", coin="USDT", apr="1.2%", status="Available", min_stake="1",
-            max_stake="100000", remaining="-1", precision="8", **extra) -> Dict:
+            max_stake="100000", remaining="-1", precision="8", redeem_minutes="0",
+            **extra) -> Dict:
     p = {"category": "FlexibleSaving", "productId": pid, "coin": coin,
          "estimateApr": apr, "status": status, "minStakeAmount": min_stake,
          "maxStakeAmount": max_stake, "remainingPoolAmount": remaining,
-         "precision": precision, "hasTieredApr": False}
+         "precision": precision, "hasTieredApr": False,
+         "redeemProcessingMinute": redeem_minutes}
     p.update(extra)
     return {k: v for k, v in p.items() if v is not None}
 
