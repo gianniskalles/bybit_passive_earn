@@ -96,10 +96,10 @@ class FakeBybit:
         return {"orderId": order_id, "orderLinkId": body["orderLinkId"]}
 
 
-def order(order_type="Redeem", pid="1", coin="USDT", status="Pending", link="prev-1"):
+def order(order_type="Redeem", pid="1", coin="USDT", status="Pending", link="prev-1", age_s=60):
     return {"orderId": "o-" + link, "orderLinkId": link, "orderType": order_type,
             "coin": coin, "productId": pid, "orderValue": "5", "status": status,
-            "createdAt": str(NOW_MS() - 60_000)}
+            "createdAt": str(NOW_MS() - age_s * 1000)}
 
 
 def position(pid="1", coin="USDT", amount="5", status="Active") -> Dict:

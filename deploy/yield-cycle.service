@@ -1,0 +1,18 @@
+[Unit]
+Description=Bybit Earn yield rotation — one cycle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes/yield_rotation
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ExecStart=/opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/run_yield_cycle.py
+# One cycle must finish well inside the 10-minute cadence.
+TimeoutStartSec=540

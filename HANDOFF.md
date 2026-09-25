@@ -1,292 +1,194 @@
-# HANDOFF.md — v5.3
+# HANDOFF.md
 
-> **Αυτό το αρχείο είναι το σημείο εκκίνησης κάθε νέας συνεδρίας.**
-> Αν δεν υπάρχει προηγούμενο context, **ξεκίνα ΟΠΩΣΔΗΠΟΤΕ διαβάζοντας
-> αυτό το αρχείο** πριν κάνεις οτιδήποτε άλλο.
+> **Σημείο εκκίνησης κάθε νέας συνεδρίας.** Διάβασέ το ολόκληρο πριν αλλάξεις
+> οτιδήποτε. Το σχέδιο ολοκλήρωσης είναι το `FINISH_PLAN.md`· οι οδηγίες
+> εγκατάστασης για τον Hermes είναι το `DEPLOY.md`.
 
-**Project:** Bybit Earn yield-rotation agent (Hermes)
-**Repo:** `/opt/hermes/yield_rotation/`
-**Τελευταίο commit:** v5.3 heartbeat rewrite + shared signing + tests
+**Project:** Bybit Earn yield rotation (USDT, FlexibleSaving)
+**Repo στο VPS:** `/opt/hermes/yield_rotation/`
+**Κατάσταση:** Φάσεις 0–5 του `FINISH_PLAN.md` ολοκληρωμένες. Η Φάση 6
+(deploy, testnet, επταήμερο dry-run, live) **δεν έχει ξεκινήσει**.
+`DRY_RUN: true`.
 
 ---
 
-## 1. Τι είναι αυτό το σύστημα
-
-Ένα αυτόνομο πρόγραμμα που ανιχνεύει ευκαιρίες yield στο Bybit Earn
-(USDT) και — όταν ο χρήστης (Giannis) δώσει ρητό OK — εκτελεί stakes.
-Αποτελείται από:
+## 1. Αρχεία
 
 | Αρχείο | Ρόλος |
 |---|---|
-| `run_yield_cycle.py` | Ο **wrapper/verifier**: φορτώνει config, τραβάει snapshot, φιλτράρει προϊόντα, καλεί LLM agent, αξιολογεί αποφάσεις, εκτελεί. |
-| `heartbeat.py` | **Καρδιακός παλμός**. Ανανεώνει τη risk_state ώστε ο επόμενος κύκλος να μη χρειάζεται `forced:true`. Λειτουργεί ξεχωριστά μέσω systemd timer. |
-| `settings.py` | **Όλα τα paths** (env var με default για το VPS) και το ενιαίο `load_env`. |
-| `signing.py` | **ΜΟΝΑΔΙΚΗ πηγή αλήθειας** για canonical JSON + HMAC-SHA256. Το εισάγουν ΚΑΙ το heartbeat.py ΚΑΙ το risk_state.py. |
-| `risk_state.py` | Διαβάζει/γράφει/επαληθεύει τη risk_state (δομημένο αποτέλεσμα). CLI: `verify`, `write` (operator). |
-| `executor.py` | Dry-run vs live execution wrapper. |
-| `bybit_earn_tool.py` | Bybit Earn API client (CLI). |
-| `config/yield_rotation.yaml` | Όλες οι παράμετροι στρατηγικής. |
-| `tests/test_heartbeat.py` | Tests του heartbeat (decision table, bootstrap, ανθεκτικότητα). |
-| `tests/test_cycle.py` | Tests του wrapper χωρίς LLM (πύλες, ποσά, REDEEM, prompt, JSON, εντολή agent). |
-| `tests/test_risk_state.py` | Tests του `risk_state.py`. |
-| `tests/test_data_integrity.py` | Tests της Φάσης 3 (πεδία, APR, κωδικοί, config, crash). |
-| `tests/run_regression.py` | LLM regression (μόνο VPS) πάνω στο `run_cycle` της παραγωγής. |
-| `tests/regression_fixtures.py`, `tests/replay.py`, `tests/data/` | Σενάρια regression, replay αποθηκευμένων απαντήσεων Bybit. |
-| `tests/test_regression_harness.py`, `tests/test_recorded_payloads.py` | Ότι το regression είναι η διαδρομή της παραγωγής· ότι οι καταγραφές αναλύονται σωστά. |
-| `scripts/testnet.py` | `capture` / `roundtrip` για το testnet (Φάση 6). |
-| `tests/test_bybit_tool.py` | Tests του Bybit client (place-order, υπογραφή, σφάλματα, testnet). |
-| `tests/test_portability.py` | Tests φορητότητας και προτεραιότητας `.env` (Φάση 0). |
+| `run_yield_cycle.py` | Ο wrapper. Ένας κύκλος: config → risk state → δεδομένα Bybit → (LLM) → πύλες → ποσά → εκτέλεση → record. |
+| `heartbeat.py` | Ο μόνος αυτόματος συντάκτης του `risk_state.json` (bootstrap, ανανέωση NORMAL). |
+| `risk_state.py` | Ανάγνωση / εγγραφή / επαλήθευση του `risk_state.json`. CLI: `verify`, `write` (operator). |
+| `signing.py` | **Μοναδική** υλοποίηση canonical JSON + HMAC-SHA256. |
+| `executor.py` | Εκτέλεση του πλάνου· dry-run ή live, ίδιο request. |
+| `bybit_earn_tool.py` | Bybit client. Σφάλμα = εξαίρεση, ποτέ `[]`. CLI μόνο ανάγνωσης. |
+| `settings.py` | Όλα τα paths (env με default για το VPS) και το ενιαίο `load_env`. |
+| `notify.py` | Ο μοναδικός αποστολέας Telegram, με dedup. |
+| `summary.py` | Ημερήσια σύνοψη στο Telegram. |
+| `telegram_bot.py` | `/status`, `/unwind`, `/resume` με επιβεβαίωση. |
+| `prompt_v6.md` | Το prompt της παραγωγής (`PROMPT_VERSION: v6`). `prompt_v5.md` για σύγκριση· `archive/` τα παλαιότερα. |
+| `config/yield_rotation.yaml` | Όλες οι παράμετροι (§6 κλειδωμένες). Κάθε πεδίο υποχρεωτικό. |
+| `deploy/` | systemd units + `install.sh`. |
+| `scripts/testnet.py` | `capture` / `roundtrip` — μόνο με `BYBIT_TESTNET=1`. |
+| `tests/` | `pytest` (χωρίς δίκτυο, χωρίς `/opt`)· `run_regression.py` (LLM, μόνο VPS). |
 
-## 2. ΓΙΑΤΙ ΥΠΑΡΧΕΙ ΤΟ heartbeat.py (το πρόβλημα που λύνει)
+## 2. Ο κύκλος (`run_yield_cycle.run_cycle`)
 
-Το πρόβλημα: όταν η `risk_state` είναι **stale** (π.χ. ο κύκλος κράτησε
-πολύ ώρα, ή ο προηγούμενος κύκλος έφυγε με `forced:true`), ο wrapper
-αναγκάζει το επόμενο run σε `NO_NEW_POSITIONS`/`forced:true`. Αν αυτό
-μείνει, ο agent **κολλάει** — δεν μπορεί ποτέ να ανοίξει νέες θέσεις.
+1. **Config** — ελέγχεται ολόκληρο (`CONFIG_SCHEMA`: τύποι, εύρη). Άκυρο ή
+   μη αναγνώσιμο → record `CONFIG_INCOMPLETE`, exit 3, τίποτα δεν τρέχει.
+   `SIMULATED_IDLE_BALANCE` πρέπει να είναι `null` όταν `DRY_RUN: false`.
+2. **Risk state** — `risk_state.verify()` → ενεργή κατάσταση:
 
-Το heartbeat σπάει αυτό το αδιέξοδο: τρέχει συχνά (ανεξάρτητα από τον
-wrapper), βρίσκει τη risk_state «stale NORMAL», την ανανεώνει με νέο
-timestamp, και **ο επόμενος κύκλος τρέχει κανονικά χωρίς `forced:true`**.
+   | Εγγραφή | Ενεργή κατάσταση |
+   |---|---|
+   | έγκυρη + φρέσκια (≤ 30') | ό,τι είναι υπογεγραμμένο |
+   | έγκυρη, παλιά ή `ts` στο μέλλον | NORMAL→NO_NEW_POSITIONS, NO_NEW_POSITIONS→ίδιο, UNWIND→UNWIND |
+   | απούσα / άκυρη / κακοσχηματισμένη / χωρίς κλειδί | NO_NEW_POSITIONS |
 
-## 3. Τρεις κανόνες ασφαλείας του heartbeat (v5.3 — ΜΗΝ τους σπάσεις)
+   Ο κύκλος **δεν τερματίζει ποτέ** λόγω risk state.
+3. **Δεδομένα Bybit**, κάθε πηγή χωριστά· αποτυχία → `DATA_UNAVAILABLE`
+   (μη-εμποδιστικό) και **fail closed**:
+   - positions μη αναγνώσιμα, ή **μία** θέση χωρίς αναγνώσιμο
+     `productId`/`amount` → κανένα LLM, καμία εντολή.
+   - balance ή orders μη αναγνώσιμα → καμία STAKE (`DATA_GATE_DROPPED_STAKE`).
+   - Νομίσματα κανονικοποιούνται σε κεφαλαία παντού.
+4. **Scan** — μόνο προϊόντα του whitelist με status `Available`, χωρίς tiered
+   APR, με γνωστό `redemption_eta_hours = redeemProcessingMinute/60` ≤
+   `MAX_REDEMPTION_ETA_HOURS`, φρέσκο APR history (ανά `productId`,
+   ταξινομημένο) και ≥ 6 σημεία στις τελευταίες 24 ώρες (`apr_ma_24h` =
+   μέσος όρος στο χρονικό παράθυρο). Κάθε απόρριψη → `filtered_by_wrapper`.
+   Κανένα πεδίο δεν «μαντεύεται» (κανόνας 7: άγνωστο = `null`).
+5. **Απόφαση**
+   - `UNWIND` → **το LLM δεν καλείται**· `REDEEM_ALL` για κάθε νόμισμα.
+   - Αλλιώς: `prompt_<PROMPT_VERSION>.md` (λείπει → exit 3, sha256 στο
+     record) → `hermes chat --query-file /dev/stdin -Q --toolsets= -m
+     <RESOLVED_MODEL> --reasoning <...>` (χωρίς tools, prompt από stdin) →
+     `extract_json` (το **τελευταίο** αντικείμενο με το `cycle_id` του
+     κύκλου) → επικύρωση (`product_id` παντού, χωρίς ROTATE, ποσά του LLM
+     αγνοούνται) → STAKE μόνο σε προϊόν του scan, REDEEM μόνο σε θέση.
+6. **Πύλες** (ντετερμινιστικές, τελευταίες):
+   - STAKE μόνο σε `NORMAL` (`RISK_GATE_DROPPED_STAKE`)· και το `Executor`
+     αρνείται STAKE από μόνο του.
+   - Θέση σε προϊόν με status ≠ Available → REDEEM από τον wrapper.
+7. **Ποσά** (ποτέ από το LLM): `min(idle − RESERVE_USD, MAX_PER_PRODUCT_USD −
+   (θέση + εκκρεμείς Stake + Stake με Success στα τελευταία 30'),
+   remaining_capacity, max_stake_amount)` — το τελευταίο καλύπτει μια
+   επιτυχημένη Stake που δεν φαίνεται ακόμα στα positions,
+   προς τα κάτω στο `precision`· παράλειψη κάτω από `max(MIN_MOVE_USD,
+   min_stake_amount)`. Άγνωστο `precision`/`min`/`max` → καμία STAKE.
+   REDEEM = ολόκληρη η θέση.
+8. **Εκκρεμείς εντολές** (`GET /v5/earn/order`): status εκτός
+   `success`/`fail` = εκκρεμής → καμία νέα εντολή σε αυτό το νόμισμα.
+   Εκκρεμής που δεν αντιστοιχίζεται σε νόμισμα του whitelist (ή Stake χωρίς
+   αναγνώσιμο `productId`/`orderValue`) → **καμία νέα εντολή**
+   (`PENDING_ORDER_UNMATCHED`).
+9. **Εκτέλεση** — μόνο `POST /v5/earn/place-order` (`category, orderType,
+   accountType, amount, coin, productId, orderLinkId`). `orderLinkId =
+   <cycle_id>-S|R-<productId>`. Το dry-run `would_call` είναι ακριβώς το
+   request του live.
+10. **Record** στο `LOG_DIR/YYYY-MM-DD.jsonl`. Οποιαδήποτε απρόβλεπτη
+    εξαίρεση → `CYCLE_CRASH` με traceback, exit 4.
+11. **Μετά:** Telegram (dedup), διαγραφή raw session files > 7 ημερών.
 
-1. **LOG_DIR διαβάζεται ΑΠΟ ΤΟ CONFIG, όχι να μαντεύεται.**
-   Διαβάζεται από `config/yield_rotation.yaml` (το ίδιο που διαβάζει ο
-   wrapper). Αν ο φάκελος **δεν υπάρχει** → αποτυχία (exit 3) + alert,
-   **ΔΕΝ** αντιμετωπίζεται σιωπηλά ως bootstrap.
-   - «**Δεν υπάρχει φάκελος**» (MISCONFIG → error/exit 3) **πρέπει να
-     ξεχωρίζει ρητά** από «**καμία εκτέλεση ακόμα**» (bootstrap → NORMAL).
+## 3. Κωδικοί
 
-2. **ΜΙΑ υλοποίηση υπογραφής.** Το canonical JSON + HMAC βρίσκονται
-   αποκλειστικά στο `signing.py`. Το εισάγουν και το `heartbeat.py` και
-   το `risk_state.py`. Αν οι δύο σειριοποιήσεις αποκλίσουν, το λάθος
-   εμφανίζεται ως `RISK_STATE_BAD_SIGNATURE` (υποψία παραποίησης) — όχι
-   ως ασυμφωνία κώδικα. **Μην δημιουργήσεις δεύτερη υλοποίηση HMAC.**
+| Κωδικός | Εμποδίζει το heartbeat; |
+|---|---|
+| `CONFIG_INCOMPLETE`, `CRITICAL`, `AGENT_PARSE_ERROR`, `DECISION_VALIDATION_FAILED`, `CYCLE_CRASH` | **ναι** (`heartbeat.BLOCKING_CODES`) |
+| `AGENT_TIMEOUT`, `DATA_UNAVAILABLE`, `NO_ELIGIBLE_PRODUCTS`, `RISK_STATE_*`, `RISK_GATE_DROPPED_STAKE`, `DATA_GATE_DROPPED_STAKE`, `PENDING_ORDERS`, `PENDING_ORDER_UNMATCHED`, `STALE_SCAN`, `CYCLE_LATENCY_HIGH` | όχι |
 
-3. **Ο heartbeat δεν αγγίζει ποτέ κατάσταση που δεν έγραψε ο ίδιος για
-   bootstrap.** Προάγει σε `NORMAL` **μόνο** `NO_NEW_POSITIONS` με
-   `source: heartbeat_bootstrap`, και μόνο αφού ο τελευταίος κύκλος είναι
-   καθαρός, επαλήθευσε **αυτή ακριβώς** την εγγραφή (ίδιο `ts`) και έτρεξε
-   μετά από αυτή. Καταστάσεις `source: operator` και κάθε `UNWIND` δεν
-   ξαναγράφονται ποτέ. **ABSTAIN = καμία εγγραφή.**
+Κάθε αλλαγή εδώ γίνεται στο ίδιο commit με το `BLOCKING_CODES` και το
+`test_blocking_codes_are_exact`.
 
-## 4. Decision table του heartbeat (Φάση 1)
+## 4. Heartbeat
 
 | Κατάσταση | Αποτέλεσμα |
 |---|---|
 | Bybit API μη προσβάσιμο | ABSTAIN |
-| Τελευταίος κύκλος με εμποδιστικό κωδικό (`BLOCKING_CODES`) | ABSTAIN + alert |
-| Φάκελος LOG_DIR δεν υπάρχει | **ERROR exit 3** + alert |
-| Αρχείο απόν | Γράφει `NO_NEW_POSITIONS`, `source: heartbeat_bootstrap` |
-| Μη αναγνώσιμο / κακοσχηματισμένο / λάθος HMAC | ABSTAIN + alert, ποτέ αντικατάσταση |
-| Bootstrap `NO_NEW_POSITIONS` + επαληθευμένος καθαρός κύκλος μετά το `ts` | Γράφει `NORMAL`, `source: heartbeat_renew` |
-| `NORMAL` + φρέσκο | Τίποτα |
-| `NORMAL` + παλιό + scanner ζωντανός | Ανανεώνει `NORMAL` |
-| `NORMAL` + παλιό + scanner νεκρός | ABSTAIN + alert |
-| Οτιδήποτε άλλο (operator, `UNWIND`, bootstrap χωρίς κύκλο) | ABSTAIN (+ alert αν παλιό) |
+| Τελευταίος κύκλος με εμποδιστικό κωδικό | ABSTAIN + alert |
+| `LOG_DIR` δεν υπάρχει | exit 3 + alert (ποτέ bootstrap) |
+| Αρχείο απόν | γράφει `NO_NEW_POSITIONS`, `source: heartbeat_bootstrap` |
+| Μη αναγνώσιμο / κακοσχηματισμένο / λάθος HMAC | ABSTAIN + alert, **ποτέ αντικατάσταση** |
+| Bootstrap + ο τελευταίος κύκλος καθαρός, επαλήθευσε **αυτή** την εγγραφή (ίδιο `ts`) και έτρεξε μετά | γράφει `NORMAL`, `source: heartbeat_renew` |
+| `NORMAL` φρέσκο | τίποτα |
+| `NORMAL` παλιό + scanner ζωντανός (κύκλος στα τελευταία 30') | ανανεώνει |
+| `NORMAL` παλιό + scanner νεκρός | ABSTAIN + alert |
+| Οτιδήποτε άλλο (`source: operator`, κάθε `UNWIND`) | ABSTAIN (+ alert αν παλιό) |
 
-`BLOCKING_CODES` = `CONFIG_INCOMPLETE`, `CRITICAL`, `AGENT_PARSE_ERROR`,
-`DECISION_VALIDATION_FAILED`, `CYCLE_CRASH`. Το `CYCLE_MODEL_MISMATCH` καταργήθηκε (T1.9).
+**ABSTAIN = καμία εγγραφή.** Το heartbeat δεν αγγίζει ποτέ κατάσταση operator.
 
-### Risk state στον wrapper
+## 5. Risk state και operator
 
-`risk_state.py` (ρίζα repo) — εγγραφή `profile, state, ts, reason, source,
-sig`. Το `verify()` επιστρέφει `Verification(code, signature_valid, fresh,
-state, source, ts, ...)`. Εγγραφές χωρίς `source` (παλιό σχήμα) είναι
-`RISK_STATE_MALFORMED` — στο deploy ξεκινάμε από καινούργιο αρχείο.
+Εγγραφή: `{profile, state, ts, reason, source, sig}`, όλα υπογεγραμμένα.
+Εγγραφές χωρίς `source` (παλιό σχήμα) είναι `RISK_STATE_MALFORMED`.
 
-| Επαληθευμένη εγγραφή | Ενεργή κατάσταση |
-|---|---|
-| έγκυρη + φρέσκια | ό,τι είναι υπογεγραμμένο |
-| έγκυρη, παλιά (ή `ts` στο μέλλον) | NORMAL→NO_NEW_POSITIONS, NO_NEW_POSITIONS→ίδιο, UNWIND→UNWIND |
-| απούσα / άκυρη / κακοσχηματισμένη / χωρίς κλειδί | NO_NEW_POSITIONS + alert |
+Χειροκίνητα (γράφει `source: operator`):
 
-Ο κύκλος **δεν τερματίζει** ποτέ λόγω risk state. Πύλες (ντετερμινιστικές,
-μετά το LLM, ακριβώς πριν την εκτέλεση):
-- `NO_NEW_POSITIONS`: κάθε STAKE αφαιρείται (`RISK_GATE_DROPPED_STAKE`,
-  μη-εμποδιστικό)· το `Executor` αρνείται STAKE και μόνο του
-  (`allow_new_positions`).
-- `UNWIND`: **το LLM δεν καλείται**· `REDEEM_ALL` από τα positions.
-- Σε κάθε κατάσταση: θέση σε προϊόν με status ≠ Available → REDEEM από τον
-  wrapper (`origin: wrapper`).
+```bash
+sudo -u hermes /opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/risk_state.py write UNWIND "λόγος"
+sudo -u hermes /opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/risk_state.py verify
+```
 
-### Εκτέλεση και σφάλματα Bybit (Φάση 2)
+Ή από Telegram (`yield-telegram-bot.service`, δικό του token
+`YIELD_TELEGRAM_BOT_TOKEN`): `/unwind` ή `/resume` → `/confirm <κωδικός>` σε
+2 λεπτά. Δεκτά μόνο μηνύματα με `chat.id` **και** `from.id` =
+`ALERT_TELEGRAM_CHAT_ID`.
 
-- **Μία εντολή εγγραφής:** `POST /v5/earn/place-order` με `category,
-  orderType (Stake|Redeem), accountType, amount, coin, productId,
-  orderLinkId`. Το request φτιάχνεται από το `place_order_request()` —
-  το ίδιο dict είναι το `would_call` του dry-run και αυτό που στέλνεται live.
-- **`orderLinkId`** ντετερμινιστικό: `<cycle_id>-S|R-<productId>` (≤ 36,
-  αλλιώς hash).
-- **Κανένα σιωπηλό `[]`:** κάθε αποτυχία (HTTP, timeout, μη-JSON,
-  `retCode ≠ 0`, λείπει η λίστα) → `BybitAPIError`. Ο wrapper το γράφει στο
-  `data_errors` και ως `DATA_UNAVAILABLE: <πηγή>` (μη-εμποδιστικό).
-- **Fail closed:**
-  - positions μη αναγνώσιμα → **κανένα LLM, καμία εντολή** στον κύκλο.
-    Το ίδιο ισχύει αν **μία** θέση δεν έχει αναγνώσιμο `productId` ή
-    `amount`: αλλιώς θα μετρούσε 0 στο όριο ανά προϊόν.
-  - balance ή orders μη αναγνώσιμα → **καμία STAKE** (`DATA_GATE_DROPPED_STAKE`)·
-    REDEEM επιτρέπεται.
-  - products μη αναγνώσιμα → άδειο scan, όχι `CONFIG_INCOMPLETE`.
-- **Εκκρεμείς εντολές:** κάθε κύκλος διαβάζει `GET /v5/earn/order`. Status
-  εκτός `success`/`fail` (χωρίς διάκριση πεζών-κεφαλαίων) = εκκρεμής· σε
-  νόμισμα με εκκρεμή εντολή δεν στέλνεται καμία νέα (ούτε STAKE ούτε
-  REDEEM). Τα νομίσματα κανονικοποιούνται σε κεφαλαία παντού.
-  - Εκκρεμής εντολή που **δεν αντιστοιχίζεται** σε νόμισμα του whitelist
-    (χωρίς coin, άλλο νόμισμα), ή εκκρεμής Stake χωρίς αναγνώσιμο
-    `productId`/`orderValue` → **μπλοκάρει όλες τις νέες εντολές**
-    (`PENDING_ORDER_UNMATCHED`).
-  - Τα ποσά εκκρεμών Stake αφαιρούνται από το όριο ανά προϊόν, όπως οι θέσεις.
-  - Οι τελευταίες 20 εντολές μπαίνουν στο record (`orders`).
-- **Testnet:** `BYBIT_TESTNET=1` → `https://api-testnet.bybit.com`.
-- Το `bybit_earn_tool.py` CLI είναι πλέον μόνο για ανάγνωση (`--health`,
-  `--products`, `--positions`, `--orders`, `--apr-history`, `--balance`).
+## 6. Κλειδωμένες αποφάσεις στρατηγικής — δεν αλλάζουν χωρίς ρητή εντολή του Giannis
 
-### Δεδομένα και κωδικοί (Φάση 3)
+Calibration 180 ημερών, USDT: p25 0,70% · median 1,23% · p75 1,62% · max 2,89%.
 
-- **Μόνο πραγματικά πεδία στο scan.** Αφαιρέθηκαν `apr_ma_7d`,
-  `apr_p25_180d`, `apr_p75_180d`, `tier_cap_amount`,
-  `marginal_apr_for_size`. Το prompt χρησιμοποιεί `estimate_apr`.
-- `redemption_eta_hours = redeemProcessingMinute / 60`, `null` αν λείπει.
-  Εκτός scan (για STAKE): tiered APR (`TIERED_APR_UNCERTAIN`), άγνωστο ETA
-  (`REDEMPTION_ETA_UNKNOWN`), ETA > `MAX_REDEMPTION_ETA_HOURS` (`ILLIQUID`).
-  Τα positions φέρουν `product_status` και `redemption_eta_hours` του
-  προϊόντος τους, ώστε το LLM να βλέπει τη ρευστότητα των θέσεων.
-- **APR history** ανά `productId`, ταξινομημένο κατά `timestamp`, μέσος όρος
-  στο χρονικό παράθυρο 24 ωρών έως τώρα· `null` με λιγότερα από 6 σημεία.
-- **Κωδικοί:**
-
-| Κωδικός | Εμποδιστικός; | Πότε |
+| Παράμετρος | Τιμή | Γιατί |
 |---|---|---|
-| `CONFIG_INCOMPLETE` | ναι | config άκυρο/μη αναγνώσιμο, prompt λείπει |
-| `CRITICAL` | ναι | συνοδεύει τα παραπάνω· product id εκτός scan/positions |
-| `AGENT_PARSE_ERROR` | ναι | έξοδος agent χωρίς αντικείμενο για τον κύκλο |
-| `DECISION_VALIDATION_FAILED` | ναι | έξοδος agent εκτός σχήματος |
-| `CYCLE_CRASH` | ναι | οποιαδήποτε απρόβλεπτη εξαίρεση (record με traceback, exit 4) |
-| `AGENT_TIMEOUT` | όχι | ο agent δεν απάντησε σε 280 s |
-| `DATA_UNAVAILABLE` | όχι | αποτυχία ανάγνωσης από Bybit |
-| `RISK_STATE_*`, `RISK_GATE_*`, `DATA_GATE_*`, `PENDING_*`, `STALE_SCAN`, `CYCLE_LATENCY_HIGH` | όχι | — |
+| `ENTRY_APR` | 0.001 | Οτιδήποτε θετικό κερδίζει το αδρανές υπόλοιπο |
+| `EXIT_APR` | 0 | Ένα προϊόν USDT: η εξαργύρωση λόγω πτώσης επιτοκίου στέλνει τα χρήματα στο 0% |
+| `MIN_APR_EDGE` | 0.009 | p75 − p25· αφορά μόνο δεύτερο προϊόν |
+| `MAX_REDEMPTION_ETA_HOURS` | 2 | Όχι 0 — το 0 ενεργοποιεί έξοδο με την παραμικρή καθυστέρηση |
+| `MAX_SCAN_AGE_SECONDS` | 900 | Ηλικία του ζωντανού scan |
+| `MAX_APR_HISTORY_GAP_HOURS` | 4 | Ηλικία του APR history (ωριαία ανανέωση) |
+| `COIN_WHITELIST` | `[USDT]` | Ποτέ μεταφορά μεταξύ διαφορετικών νομισμάτων |
+| `RESOLVED_MODEL` | `google/gemini-2.5-flash` | Στέλνεται αυτούσιο στο CLI, όχι μέσω alias |
+| `ACCOUNT_TYPE` | `UNIFIED` | — |
+| `DRY_RUN` | `true` | Αλλάζει μόνο από τον Giannis, στη Φάση 6 |
 
-- **Config (T3.6):** όλα τα πεδία του `config/yield_rotation.yaml` είναι
-  υποχρεωτικά και ελέγχονται σε τύπο και εύρος (`CONFIG_SCHEMA` στο
-  `run_yield_cycle.py`) πριν από οτιδήποτε άλλο· `SIMULATED_IDLE_BALANCE`
-  πρέπει να είναι `null` όταν `DRY_RUN: false`. Αποτυχία → record με
-  `CONFIG_INCOMPLETE`, exit 3.
+Αποφάσεις σχεδίασης (§2 του `FINISH_PLAN.md`): bootstrap Α1-Β· το ποσό το
+υπολογίζει ο wrapper (Α2)· ROTATE αφαιρέθηκε (Α3)· repo private (Α4 — ρύθμιση
+στο GitHub, εκκρεμεί από τον Giannis).
 
-### Regression (Φάση 4)
+## 7. Κανόνες για κάθε αλλαγή
 
-- **Δύο επίπεδα:**
-  - `pytest` — όλη η ντετερμινιστική συμπεριφορά (πύλες, παλαίωση, ποσά,
-    REDEEM, product ids, `extract_json`, config, crash), χωρίς LLM, σε
-    δευτερόλεπτα. Τα παλιά fixtures 02, 04–09 έγιναν wrapper tests· το 03
-    (tier cap) καταργήθηκε μαζί με το πεδίο.
-  - `tests/run_regression.py` — **μόνο ποιότητα απόφασης** με το πραγματικό
-    μοντέλο (STAKE όταν πρέπει, HOLD όταν πρέπει), 5 σενάρια ×
-    `--runs` (default 5). Τρέχει μόνο στο VPS.
-- **Ίδια διαδρομή με την παραγωγή:** το regression καλεί το
-  `run_cycle` με το `call_agent` της παραγωγής και το πραγματικό config·
-  τα δεδομένα Bybit είναι αποθηκευμένες απαντήσεις που περνούν από τον
-  πραγματικό `BybitEarnTool` (`tests/replay.py`). Το prompt είναι byte
-  προς byte αυτό της παραγωγής (test με spy στο `compose_prompt`).
-- **Δεδομένα:** σήμερα μόνο το `tests/data/SYNTHETIC_usdt_flexible.json`
-  (χειρόγραφο, σε σχήμα docs). Στο testnet: `scripts/testnet.py capture`
-  αποθηκεύει τις πραγματικές απαντήσεις στο `tests/data/` και το
-  `tests/test_recorded_payloads.py` κλειδώνει την ανάλυση πάνω τους·
-  `scripts/testnet.py roundtrip` κάνει Stake + Redeem και αποθηκεύει τα
-  πάντα (το test ελέγχει `orderId` και τελική κατάσταση Success). Και τα
-  δύο αρνούνται να τρέξουν χωρίς `BYBIT_TESTNET=1`.
-- `NO_ELIGIBLE_PRODUCTS` (μη-εμποδιστικό): κανένα προϊόν δεν πέρασε τα
-  φίλτρα (π.χ. παλιό APR history). Πριν τη Φάση 3 αυτό έγραφε
-  `CONFIG_INCOMPLETE` και πάγωνε το heartbeat για κάτι παροδικό.
+1. Πρώτα test που αποτυγχάνει, μετά η διόρθωση. Τα tests ακολουθούν το
+   spec· ποτέ αλλαγή test για να περάσει.
+2. Καμία κλήση δικτύου στα tests· κανένα κλειδί, κανένα `.env` στο repo.
+3. Ποτέ `DRY_RUN: false` σε default ή σε αρχείο.
+4. Μία υλοποίηση HMAC (`signing.py`), ένας αποστολέας Telegram (`notify.py`),
+   μία εντολή agent (`build_agent_command`).
+5. Άγνωστο = `null`· αποτυχία ανάγνωσης = fail closed, ποτέ σιωπηλή.
 
-### Ποσά (T1.5)
-
-Το LLM δεν δίνει ποσό (prompt v6). Ο wrapper:
-`min(idle − RESERVE_USD, MAX_PER_PRODUCT_USD − ήδη_κρατούμενο_στο_προϊόν,
-remaining_capacity, max_stake_amount)`, στρογγυλεμένο προς τα κάτω στο
-`precision` του προϊόντος· παράλειψη αν < `max(MIN_MOVE_USD,
-min_stake_amount)`. Το «ήδη κρατούμενο» προστέθηκε ώστε το
-`MAX_PER_PRODUCT_USD` να είναι όριο ανά προϊόν και όχι ανά κύκλο.
-Άγνωστο `precision`, `max_stake_amount` ή `min_stake_amount` → καμία STAKE
-(κανόνας 7). REDEEM = πάντα ολόκληρη η θέση, χωρίς όριο `MIN_MOVE_USD`.
-
-## 5. Πώς τρέχεις τα tests (επιβεβαίωσε ότι όλα περνάνε)
+## 8. Tests
 
 ```bash
 pip install -r requirements-dev.txt
-pytest            # από τη ρίζα του repo — οπουδήποτε, όχι μόνο στο VPS
+pytest                                   # οπουδήποτε· CI σε κάθε push
+/opt/hermes/.venv/bin/python tests/run_regression.py --runs 5   # μόνο VPS, πραγματικό μοντέλο
 ```
 
-- Το `tests/conftest.py` στέλνει όλα τα paths σε `tmp_path`, σβήνει κλειδιά
-  από το περιβάλλον και **απαγορεύει κάθε σύνδεση δικτύου**.
-- Το `tests/run_regression.py` (LLM regression) **δεν** τρέχει από το
-  `pytest`· χρειάζεται τον πραγματικό agent στο VPS.
-- CI: `.github/workflows/tests.yml` τρέχει `pytest` σε κάθε push και PR.
+`tests/conftest.py`: όλα τα paths σε `tmp_path`, κλειδιά σβησμένα,
+**κάθε σύνδεση δικτύου απαγορεύεται**.
 
-### Paths και `.env` (Φάση 0)
+## 9. Ανοιχτά — τι μένει
 
-Όλα τα paths βρίσκονται στο `settings.py`: env var με default για το VPS.
-Το `ROOT` προκύπτει από το `__file__`. Κανένα module δεν έχει side effect
-στο import (ούτε `mkdir`, ούτε ανάγνωση `.env`, ούτε `sys.path.insert`).
-
-| Env var | Default (VPS) |
-|---|---|
-| `YIELD_HERMES_HOME` | `/opt/hermes` |
-| `YIELD_CONFIG_FILE` | `<repo>/config/yield_rotation.yaml` |
-| `YIELD_STATE_FILE` | `/opt/hermes/state/risk_state.json` |
-| `YIELD_SESSION_DIR` | `/opt/hermes/state/yield_rotation_sessions` |
-| `YIELD_HERMES_BIN` | `/opt/hermes/.venv/bin/hermes` |
-| `YIELD_ENV_FILE` | `/opt/hermes/.env` |
-| `YIELD_SHARED_ENV_FILE` | `/opt/data/.env` |
-| `YIELD_RISK_STATE_DIR` | `/opt/hermes/tools` (προσωρινό, βλ. παρακάτω) |
-
-Ενιαίο `settings.load_env()`, χωρίς εγγραφή στο `os.environ`:
-**process env → `/opt/hermes/.env` → από το `/opt/data/.env` ΜΟΝΟ το
-`TELEGRAM_BOT_TOKEN`**. Το κοινόχρηστο αρχείο δεν μπορεί πλέον να δώσει ή να
-αντικαταστήσει κλειδιά Bybit ή το HMAC. Κανένα `.env` δεν φορτώνεται από το
-τρέχον directory.
-
-## 6. Τρέχον σημείο προόδου
-
-Το σχέδιο ολοκλήρωσης είναι το `FINISH_PLAN.md`. Ο Hermes δεν εμπλέκεται
-μέχρι το deploy· οδηγίες στο `DEPLOY.md` (γράφεται στο τέλος της Φάσης 5).
-
-- ✅ **Φάση 0 — Φορητό repo** (T0.1–T0.4).
-- ✅ **Φάση 1 — Ασφάλεια** (T1.1–T1.10), K1–K4, K6–K11, K15 (μέρος K12:
-  ίδια εντολή agent σε παραγωγή και regression).
-  - `risk_state.py` στη ρίζα, χωρίς fallback στο `/opt/hermes/tools`.
-  - Prompt v6 (`PROMPT_VERSION: v6`)· το v4 στο `archive/`· το sha256 του
-    prompt στο record.
-  - `extract_json` δέχεται μόνο το **τελευταίο** αντικείμενο με το
-    `cycle_id` του κύκλου.
-  - Εντολή agent: `hermes chat --query-file /dev/stdin -Q --toolsets= -m
-    <RESOLVED_MODEL> --reasoning <...>` — prompt από stdin, χωρίς tools.
-- ⚠️ **Το prompt v6 δεν έχει δοκιμαστεί με το πραγματικό μοντέλο.** Βήμα
-  του `DEPLOY.md`, πριν το επταήμερο dry-run.
-- ✅ **Φάση 2 — Διαδρομή εκτέλεσης** (T2.1–T2.5), K5, K16, μέρος K20.
-- ⚠️ **Προς επιβεβαίωση στο testnet** (δεν υπάρχουν καταγεγραμμένα
-  payloads Bybit στο repo): ότι το `/v5/earn/product` δίνει `precision` και
-  `maxStakeAmount`· ότι το `/v5/earn/position` επιστρέφει `result.list`· τα
-  πεδία του `/v5/earn/order` (`status`, `orderType`, `coin`) και του
-  `/v5/earn/apr-history`. Κάθε απόκλιση αποτυγχάνει **ασφαλώς** (καμία
-  STAKE, `DATA_UNAVAILABLE` ή λόγος στο `executions[].reason`).
-- 📝 Για το `DEPLOY.md`: LLM regression του v6 με το πραγματικό μοντέλο στο
-  VPS, **πριν** το επταήμερο dry-run.
-- ✅ **Φάση 3 — Ακεραιότητα δεδομένων** (T3.1–T3.7), K13, K14.
-- ✅ **Φάση 4 — Regression που μετράει την παραγωγή** (T4.1–T4.4), K12.
-- Εκκρεμεί η Φάση 5 (K19, K20 υπόλοιπο).
-
-## 7. Εκκρεμότητες / TODO για την επόμενη συνεδρία
-
-- [ ] Φάσεις 3–5 του `FINISH_PLAN.md`, μετά `DEPLOY.md`.
-- [ ] Αν προσθέσετε νέα αρχεία Python που γράφουν/διαβάζουν HMAC,
-  **βεβαιώσου ότι κάνουν import από `signing.py`** — ποτέ δεύτερη
-  υλοποίηση.
-
-## 8. Τι ΠΡΕΠΕΙ να πεις στο επόμενο «ξεκινάμε»
-
-> Διάβασε πρώτα το `/opt/hermes/yield_rotation/HANDOFF.md` πριν προχωρήσεις.
-
----
-
-_Τελευταία ενημέρωση: Φάση 4 του FINISH_PLAN (regression)_
+- **Φάση 6** (`DEPLOY.md`): deploy, νέο HMAC, LLM regression του v6,
+  testnet, επταήμερο dry-run, νέο κλειδί Bybit, `DRY_RUN: false` μόνο από τον
+  Giannis.
+- **Ανεπιβεβαίωτα πεδία Bybit** — δεν υπάρχει ακόμα πραγματική καταγραφή
+  (μόνο `tests/data/SYNTHETIC_usdt_flexible.json`): `precision`,
+  `maxStakeAmount`, `redeemProcessingMinute` στο `/v5/earn/product`· το
+  `result.list` του `/v5/earn/position`· τα πεδία του `/v5/earn/order`
+  (`status`, `orderType`, `coin`, `orderValue`) και του
+  `/v5/earn/apr-history` (`timestamp`, `apr`). Κάθε απόκλιση αποτυγχάνει
+  ασφαλώς (καμία STAKE ή καμία εντολή, με λόγο στο record). Κλείνουν στο
+  testnet με `scripts/testnet.py capture` → `tests/data/` →
+  `tests/test_recorded_payloads.py`.
+- **Prompt v6 δεν έχει δοκιμαστεί με το πραγματικό μοντέλο** (βήμα του
+  `DEPLOY.md`).

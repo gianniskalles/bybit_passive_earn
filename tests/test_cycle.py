@@ -7,6 +7,7 @@ FakeAgent and inspects the decision record it writes.
 import hashlib
 import json
 import re
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -506,7 +507,8 @@ def test_second_cycle_does_not_resend_after_live_order(env):
 
 def test_finished_orders_do_not_block(env):
     write_state(env["YIELD_STATE_FILE"], "NORMAL")
-    tool = FakeBybit(orders=[order("Stake", "1", status="Success"),
+    # Old enough not to count against the cap (RECENT_STAKE_WINDOW_MS).
+    tool = FakeBybit(orders=[order("Stake", "1", status="Success", age_s=7200),
                              order("Redeem", "1", status="Fail", link="x")])
     run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
     assert len(tool.placed) == 1
@@ -569,7 +571,7 @@ def test_pending_order_outside_whitelist_blocks_every_coin(env):
 @pytest.mark.parametrize("status", ["SUCCESS", "success", " Fail "])
 def test_final_status_is_case_insensitive(env, status):
     write_state(env["YIELD_STATE_FILE"], "NORMAL")
-    tool = FakeBybit(orders=[order("Stake", "1", status=status)])
+    tool = FakeBybit(orders=[order("Stake", "1", status=status, age_s=7200)])
     run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
     assert len(tool.placed) == 1
 
@@ -623,3 +625,23 @@ def test_stale_apr_history_is_filtered(env):
     assert agent.called is False  # nothing to decide on
     assert any(a.startswith("NO_ELIGIBLE_PRODUCTS") for a in rec["alerts"])
     assert blocking_alerts(rec) == []  # transient: must not freeze the heartbeat
+
+
+def test_recent_successful_stake_counts_against_cap(env):
+    """A Stake that Bybit reports Success may not be in /v5/earn/position
+    yet; it must still count against MAX_PER_PRODUCT_USD."""
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    done = order("Stake", "1", status="Success")
+    done["orderValue"] = "5"
+    tool = FakeBybit(orders=[done])  # no position reported yet
+    rec, _ = run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), MAX_PER_PRODUCT_USD=5, **LIVE)
+    assert tool.placed == []
+
+
+def test_old_successful_stake_is_not_double_counted(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    done = order("Stake", "1", status="Success")
+    done["createdAt"] = str(int(time.time() * 1000) - 2 * 3600 * 1000)
+    tool = FakeBybit(orders=[done])
+    run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert len(tool.placed) == 1

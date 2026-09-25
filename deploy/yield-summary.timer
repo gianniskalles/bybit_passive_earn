@@ -1,0 +1,9 @@
+[Unit]
+Description=Bybit Earn yield rotation — daily summary at 06:55 UTC
+
+[Timer]
+OnCalendar=*-*-* 06:55:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

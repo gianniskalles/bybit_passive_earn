@@ -47,7 +47,7 @@ print(json.dumps({
 """
 
 MODULES = ["run_yield_cycle", "heartbeat", "bybit_earn_tool", "executor", "signing",
-           "risk_state", "settings"]
+           "risk_state", "settings", "notify", "summary", "telegram_bot"]
 
 
 def _clean_env(**extra):

@@ -1,0 +1,17 @@
+[Unit]
+Description=Bybit Earn yield rotation — daily Telegram summary
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes/yield_rotation
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ExecStart=/opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/summary.py
+TimeoutStartSec=120

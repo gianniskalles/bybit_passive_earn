@@ -49,6 +49,7 @@ import risk_state
 import settings
 from bybit_earn_tool import BybitAPIError, BybitEarnTool
 from executor import Executor
+from notify import Notifier
 
 ROOT = settings.ROOT
 
@@ -57,6 +58,10 @@ MIN_APR_POINTS = 6  # fewer points in the 24 h window -> apr_ma_24h is null
 JSONL_FILE = "{date}.jsonl"  # LOG_DIR / jsonl template
 CYCLE_LATENCY_ALERT_S = 300
 AGENT_TIMEOUT_S = 280
+SESSION_RETENTION_DAYS = 7
+# A Stake Bybit reports Success may lag behind /v5/earn/position; count it
+# against the per-product cap for this long (double counting only under-stakes).
+RECENT_STAKE_WINDOW_MS = 30 * 60 * 1000
 
 AGENT_ACTIONS = ("STAKE", "REDEEM", "REDEEM_ALL", "HOLD", "ALERT_ONLY",
                  "NO_NEW_POSITIONS", "REJECTED_CROSS_COIN")
@@ -335,9 +340,19 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
     except BybitAPIError as e:
         data_errors["orders"] = str(e)
     pending_coins, pending_unmatched = set(), []
+    # Stake amounts committed but maybe not yet in positions: pending, plus
+    # recently successful (RECENT_STAKE_WINDOW_MS).
     pending_stakes: Dict[str, Decimal] = {}
     for o in orders:
-        if str(o.get("status") or "").strip().lower() in FINAL_ORDER_STATUSES:
+        status = str(o.get("status") or "").strip().lower()
+        if status == "success" and str(o.get("orderType") or "").strip().lower() == "stake":
+            created, pid, value = (_opt_float(o.get("createdAt")), _norm_id(o.get("productId")),
+                                   _dec(o.get("orderValue")))
+            if (created is not None and snapshot_ts - created < RECENT_STAKE_WINDOW_MS
+                    and pid is not None and value is not None and value > 0):
+                pending_stakes[pid] = pending_stakes.get(pid, Decimal(0)) + value
+            continue
+        if status in FINAL_ORDER_STATUSES:
             continue
         coin = _norm_coin(o.get("coin"))
         if coin not in whitelist:
@@ -1003,6 +1018,61 @@ def _cycle(cfg: Dict[str, Any], tool, agent: Agent, cycle_id: str, rec: Dict[str
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# After the cycle: notifications and housekeeping                             #
+# --------------------------------------------------------------------------- #
+
+def notify_cycle(rec: Dict[str, Any], notifier: Notifier) -> None:
+    """Telegram, deduplicated per channel (T5.2): blocking codes, the
+    effective risk state, unreadable data, unattributable pending orders.
+    Every live order is an event (always sent)."""
+    from heartbeat import _is_blocking_code
+
+    cid = rec.get("cycle_id")
+    blocking = sorted({c for c in map(_is_blocking_code, rec.get("alerts", [])) if c})
+    notifier.observe("cycle", ",".join(blocking) or None,
+                     f"🚨 CYCLE {cid}: {', '.join(blocking)} — heartbeat will not renew. "
+                     f"Alerts: {'; '.join(rec.get('alerts', []))[:1500]}",
+                     resolved_text="✅ CYCLE: no blocking codes any more")
+    state = rec.get("risk_state")
+    meta = rec.get("risk_state_meta") or {}
+    notifier.observe("risk_state", None if state == "NORMAL" else f"{state}:{meta.get('code')}",
+                     f"⚠️ RISK STATE {state} ({meta.get('code')}, source={meta.get('source')}): "
+                     f"no new positions" + ("; redeeming everything" if state == "UNWIND" else ""),
+                     resolved_text="✅ RISK STATE back to NORMAL")
+    errors = rec.get("data_errors") or {}
+    notifier.observe("data", ",".join(sorted(errors)) or None,
+                     f"⚠️ Bybit data unavailable: {', '.join(sorted(errors))} — no STAKE while it lasts",
+                     resolved_text="✅ Bybit data readable again")
+    unmatched = [a for a in rec.get("alerts", []) if a.startswith("PENDING_ORDER_UNMATCHED")]
+    notifier.observe("pending_unmatched", "unmatched" if unmatched else None,
+                     f"⚠️ {unmatched[0] if unmatched else ''}",
+                     resolved_text="✅ no unattributable pending orders")
+    for e in rec.get("executions", []):
+        if e.get("executed"):
+            notifier.event(f"✅ ORDER {e.get('action')} {e.get('amount')} {e.get('coin')} "
+                           f"product {e.get('product_id')} orderId "
+                           f"{(e.get('response') or {}).get('orderId')} (cycle {cid})")
+        elif e.get("error"):
+            notifier.event(f"🚨 ORDER FAILED {e.get('action')} {e.get('amount')} {e.get('coin')} "
+                           f"product {e.get('product_id')}: {e['error'][:300]}")
+
+
+def cleanup_sessions(session_dir: Path, max_age_days: int = SESSION_RETENTION_DAYS,
+                     now: Optional[float] = None) -> int:
+    """Delete raw agent session files older than max_age_days (T5.4)."""
+    cutoff = (time.time() if now is None else now) - max_age_days * 86400
+    removed = 0
+    for f in Path(session_dir).glob("*.raw"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=settings.config_file())
@@ -1019,6 +1089,11 @@ def main():
         cfg["DRY_RUN"] = True
 
     rec, rc = run_cycle(cfg, tool=BybitEarnTool(), agent=call_agent, config_error=config_error)
+    try:
+        notify_cycle(rec, Notifier(settings.load_env(), cfg))
+        cleanup_sessions(settings.session_dir())
+    except Exception as e:  # housekeeping must never change the cycle outcome
+        print(f"[run_yield_cycle] post-cycle housekeeping failed: {e}", file=sys.stderr)
     print(f"[run_yield_cycle] cycle_id={rec['cycle_id']}")
     print(json.dumps(rec, ensure_ascii=False, indent=2))
     sys.exit(rc)

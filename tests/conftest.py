@@ -70,6 +70,7 @@ def isolated_paths(tmp_path, monkeypatch):
         "YIELD_ENV_FILE": base / "profile.env",
         "YIELD_SHARED_ENV_FILE": base / "shared.env",
         "YIELD_SESSION_DIR": base / "sessions",
+        "YIELD_NOTIFY_STATE": base / "notify_state.json",
     }
     for key, value in paths.items():
         monkeypatch.setenv(key, str(value))

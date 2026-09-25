@@ -36,7 +36,10 @@ Environment (settings.load_env: process env > /opt/hermes/.env; the shared
 /opt/data/.env contributes TELEGRAM_BOT_TOKEN only):
   HERMES_RISK_HMAC_KEY  (required to sign/verify)
   BYBIT_API_KEY, BYBIT_API_SECRET, BYBIT_TESTNET
-  ALERT_TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+  TELEGRAM_BOT_TOKEN; chat id from config ALERT_TELEGRAM_CHAT_ID (env overrides)
+
+Alerts go through notify.Notifier: one message per change of condition,
+a reminder at most every 6 hours, and a "back to normal" when it clears.
 
 Test-only switches (never set in production):
   YIELD_LOG_DIR          override dir containing *.jsonl
@@ -54,8 +57,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
+import notify
 import risk_state
 import settings
+from notify import Notifier
 
 MAX_AGE_MS = risk_state.MAX_AGE_MS
 
@@ -186,56 +191,56 @@ def clean_cycle_verified(log_dir: Path, state_ts: int) -> bool:
 
 
 def send_telegram_alert(bot_token: str, chat_id: str, text: str) -> bool:
-    """Send a simple Telegram message via Bot API."""
-    try:
-        import urllib.parse
-        import urllib.request
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
-        req = urllib.request.Request(url, data=data)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
+    """The Telegram sender (notify.send_telegram); a module attribute so tests
+    can replace it."""
+    return notify.send_telegram(bot_token, chat_id, text)
 
 
 def main() -> int:
     env = settings.load_env()
+    cfg: Dict[str, Any] = {}
+    try:
+        cfg = load_config(settings.config_file())
+    except Exception:
+        pass  # reported by _decide
+    rc, condition, text = _decide(env)
+    notifier = Notifier(env, cfg if isinstance(cfg, dict) else {},
+                        sender=lambda t, c, x: send_telegram_alert(t, c, x))
+    notifier.observe("heartbeat", condition, text,
+                     resolved_text=None if condition else "✅ HEARTBEAT: back to normal")
+    return rc
+
+
+def _decide(env: Dict[str, str]) -> Tuple[int, Optional[str], str]:
+    """One heartbeat decision. Returns (exit_code, alert_condition, text);
+    alert_condition is None when everything is healthy."""
     state_file = settings.risk_state_file()
     config_file = settings.config_file()
-
-    def alert(text: str) -> None:
-        bot_token = env.get("TELEGRAM_BOT_TOKEN")
-        chat_id = env.get("ALERT_TELEGRAM_CHAT_ID")
-        if bot_token and chat_id:
-            send_telegram_alert(bot_token, chat_id, text)
 
     hmac_key = env.get("HERMES_RISK_HMAC_KEY")
     if not hmac_key:
         print("[heartbeat] ERROR: HERMES_RISK_HMAC_KEY not set", file=sys.stderr)
-        return 1
+        return 1, "no_hmac_key", "🚨 HEARTBEAT ERROR: HERMES_RISK_HMAC_KEY not set"
 
     try:
         cfg = load_config(config_file)
         log_dir = resolve_log_dir(cfg)
     except FileNotFoundError as e:
         print(f"[heartbeat] ERROR: {e}", file=sys.stderr)
-        alert(f"🚨 HEARTBEAT ERROR: {e}")
-        return 3  # distinct: misconfig, NOT bootstrap
+        return 3, "log_dir_missing", f"🚨 HEARTBEAT ERROR: {e}"
     except Exception as e:
         print(f"[heartbeat] ERROR: cannot read config {config_file}: {e}", file=sys.stderr)
-        return 3
+        return 3, "config_unreadable", f"🚨 HEARTBEAT ERROR: cannot read config: {e}"
 
     if os.environ.get("YIELD_SKIP_API_CHECK", "") != "1" and not check_bybit_api():
         print("[heartbeat] ABSTAIN: Bybit API unreachable")
-        return 0
+        return 0, "bybit_unreachable", "⚠️ HEARTBEAT ABSTAIN: Bybit API unreachable."
 
     cycle_ok, block_code = check_last_cycle_ok(log_dir)
     if not cycle_ok:
         print(f"[heartbeat] ABSTAIN: last cycle blocked by {block_code}")
-        alert(f"⚠️ HEARTBEAT ABSTAIN: last cycle hard-failed ({block_code}). "
-              f"Risk state NOT renewed.")
-        return 0
+        return 0, f"cycle_blocked:{block_code}", (
+            f"⚠️ HEARTBEAT ABSTAIN: last cycle hard-failed ({block_code}). Risk state NOT renewed.")
 
     interval_min = cfg.get("CYCLE_INTERVAL_MINUTES", 10)
     if not isinstance(interval_min, (int, float)) or interval_min <= 0:
@@ -251,13 +256,12 @@ def main() -> int:
                          "heartbeat bootstrap: no verified supervision cycle yet",
                          risk_state.SOURCE_BOOTSTRAP)
         print("[heartbeat] WROTE: NO_NEW_POSITIONS (bootstrap)")
-        return 0
+        return 0, None, ""
 
     if not v.signature_valid:
         print(f"[heartbeat] ABSTAIN: risk_state unverifiable ({v.code}: {v.detail})")
-        alert(f"⚠️ HEARTBEAT ABSTAIN: risk_state unverifiable ({v.code}: {v.detail}). "
-              f"NOT overwritten.")
-        return 0
+        return 0, f"unverifiable:{v.code}", (
+            f"⚠️ HEARTBEAT ABSTAIN: risk_state unverifiable ({v.code}: {v.detail}). NOT overwritten.")
 
     age_min = max(0, (v.age_ms or 0) // 60000)
 
@@ -268,31 +272,32 @@ def main() -> int:
                          "heartbeat: bootstrap promoted after verified clean cycle",
                          risk_state.SOURCE_RENEW)
         print("[heartbeat] WROTE: NORMAL (bootstrap promoted after verified clean cycle)")
-        return 0
+        return 0, None, ""
 
     if v.state != "NORMAL":
         print(f"[heartbeat] ABSTAIN: {v.state} (source={v.source}, {v.code})")
         if not v.fresh:
-            alert(f"⚠️ HEARTBEAT ALERT: risk state is {v.state} (source={v.source}) "
-                  f"and STALE ({age_min} min old). Heartbeat did NOT renew.")
-        return 0
+            return 0, f"stale_non_normal:{v.state}:{v.source}", (
+                f"⚠️ HEARTBEAT ALERT: risk state is {v.state} (source={v.source}) and STALE "
+                f"({age_min} min old). Heartbeat did NOT renew.")
+        return 0, None, ""
 
     if v.fresh:
         print("[heartbeat] OK: state is NORMAL and fresh")
-        return 0
+        return 0, None, ""
 
     if not scanner_alive(log_dir, scanner_window_ms):
         print(f"[heartbeat] ABSTAIN: NORMAL but stale ({age_min} min) AND scanner "
               f"not alive (no recent decision). NOT renewing.")
-        alert(f"⚠️ HEARTBEAT ABSTAIN: risk state is NORMAL but STALE ({age_min} min) "
-              f"AND scanner has not produced a recent decision. Risk state NOT renewed.")
-        return 0
+        return 0, "scanner_dead", (
+            f"⚠️ HEARTBEAT ABSTAIN: risk state is NORMAL but STALE ({age_min} min) AND the "
+            f"scanner has not produced a recent decision. Risk state NOT renewed.")
 
     risk_state.write(state_file, hmac_key, "NORMAL",
                      f"heartbeat (was stale {age_min} min, scanner alive)",
                      risk_state.SOURCE_RENEW)
     print(f"[heartbeat] WROTE: NORMAL (was stale {age_min} min, scanner alive)")
-    return 0
+    return 0, None, ""
 
 
 if __name__ == "__main__":
