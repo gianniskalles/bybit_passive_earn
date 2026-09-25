@@ -157,11 +157,22 @@ All flags are explicit (no env vars, no global config):
       "ts": "ISO8601",
       "action": "STAKE",
       "coin": "USDT",
-      "would_call": "bybit_earn_tool.place_order(productId=1, amount=5, accountType=UNIFIED)",
+      "product_id": "1",
+      "amount": "5",
+      "origin": "agent",
+      "order_link_id": "20260925_184351_2e2396-S-1",
+      "would_call": {"method": "POST", "path": "/v5/earn/place-order",
+                     "body": {"category": "FlexibleSaving", "orderType": "Stake",
+                              "accountType": "UNIFIED", "amount": "5", "coin": "USDT",
+                              "productId": "1",
+                              "orderLinkId": "20260925_184351_2e2396-S-1"}},
       "executed": false,
-      "reason": "dry-run"
+      "reason": "DRY_RUN"
     }
   ],
+  "orders": [ { "orderId": "...", "orderLinkId": "...", "orderType": "Stake",
+                "status": "Pending|Success|Fail", "...": "..." } ],
+  "data_errors": { "positions": "..." },
   "dry_run": true,
   "balance_source": "simulated|real",
   "filtered_by_wrapper": [

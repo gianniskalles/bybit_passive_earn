@@ -29,6 +29,7 @@
 | `tests/test_heartbeat.py` | Tests του heartbeat (decision table, bootstrap, ανθεκτικότητα). |
 | `tests/test_cycle.py` | Tests του wrapper χωρίς LLM (πύλες, ποσά, REDEEM, prompt, JSON, εντολή agent). |
 | `tests/test_risk_state.py` | Tests του `risk_state.py`. |
+| `tests/test_bybit_tool.py` | Tests του Bybit client (place-order, υπογραφή, σφάλματα, testnet). |
 | `tests/test_portability.py` | Tests φορητότητας και προτεραιότητας `.env` (Φάση 0). |
 
 ## 2. ΓΙΑΤΙ ΥΠΑΡΧΕΙ ΤΟ heartbeat.py (το πρόβλημα που λύνει)
@@ -104,6 +105,32 @@ state, source, ts, ...)`. Εγγραφές χωρίς `source` (παλιό σχ�
 - Σε κάθε κατάσταση: θέση σε προϊόν με status ≠ Available → REDEEM από τον
   wrapper (`origin: wrapper`).
 
+### Εκτέλεση και σφάλματα Bybit (Φάση 2)
+
+- **Μία εντολή εγγραφής:** `POST /v5/earn/place-order` με `category,
+  orderType (Stake|Redeem), accountType, amount, coin, productId,
+  orderLinkId`. Το request φτιάχνεται από το `place_order_request()` —
+  το ίδιο dict είναι το `would_call` του dry-run και αυτό που στέλνεται live.
+- **`orderLinkId`** ντετερμινιστικό: `<cycle_id>-S|R-<productId>` (≤ 36,
+  αλλιώς hash).
+- **Κανένα σιωπηλό `[]`:** κάθε αποτυχία (HTTP, timeout, μη-JSON,
+  `retCode ≠ 0`, λείπει η λίστα) → `BybitAPIError`. Ο wrapper το γράφει στο
+  `data_errors` και ως `DATA_UNAVAILABLE: <πηγή>` (μη-εμποδιστικό).
+- **Fail closed:**
+  - positions μη αναγνώσιμα → **κανένα LLM, καμία εντολή** στον κύκλο.
+    Το ίδιο ισχύει αν **μία** θέση δεν έχει αναγνώσιμο `productId` ή
+    `amount`: αλλιώς θα μετρούσε 0 στο όριο ανά προϊόν.
+  - balance ή orders μη αναγνώσιμα → **καμία STAKE** (`DATA_GATE_DROPPED_STAKE`)·
+    REDEEM επιτρέπεται.
+  - products μη αναγνώσιμα → άδειο scan, όχι `CONFIG_INCOMPLETE`.
+- **Εκκρεμείς εντολές:** κάθε κύκλος διαβάζει `GET /v5/earn/order`. Status
+  εκτός `Success`/`Fail` = εκκρεμής· σε νόμισμα με εκκρεμή εντολή δεν
+  στέλνεται καμία νέα (ούτε STAKE ούτε REDEEM). Οι τελευταίες 20 εντολές
+  μπαίνουν στο record (`orders`).
+- **Testnet:** `BYBIT_TESTNET=1` → `https://api-testnet.bybit.com`.
+- Το `bybit_earn_tool.py` CLI είναι πλέον μόνο για ανάγνωση (`--health`,
+  `--products`, `--positions`, `--orders`, `--apr-history`, `--balance`).
+
 ### Ποσά (T1.5)
 
 Το LLM δεν δίνει ποσό (prompt v6). Ο wrapper:
@@ -169,14 +196,20 @@ pytest            # από τη ρίζα του repo — οπουδήποτε, �
 - ⚠️ **Το prompt v6 δεν έχει δοκιμαστεί με το πραγματικό μοντέλο.** Το LLM
   regression χρειάζεται τον agent στο VPS· τα fixtures είναι ακόμα σε
   σχήμα v5 (`amount_usd`, `from_product_id`) και ξαναγράφονται στη Φάση 4.
-- ⚠️ Προς επιβεβαίωση στο testnet: ότι η Bybit επιστρέφει `precision` και
-  `maxStakeAmount` στο `/v5/earn/product`. Αν λείπουν, ο wrapper δεν κάνει
-  ποτέ STAKE (ασφαλής αποτυχία, φαίνεται στο `executions[].reason`).
-- Εκκρεμούν οι Φάσεις 2–5 (K5, K12–K14, K16, K17 μέρος, K19, K20).
+- ✅ **Φάση 2 — Διαδρομή εκτέλεσης** (T2.1–T2.5), K5, K16, μέρος K20.
+- ⚠️ **Προς επιβεβαίωση στο testnet** (δεν υπάρχουν καταγεγραμμένα
+  payloads Bybit στο repo): ότι το `/v5/earn/product` δίνει `precision` και
+  `maxStakeAmount`· ότι το `/v5/earn/position` επιστρέφει `result.list`· τα
+  πεδία του `/v5/earn/order` (`status`, `orderType`, `coin`) και του
+  `/v5/earn/apr-history`. Κάθε απόκλιση αποτυγχάνει **ασφαλώς** (καμία
+  STAKE, `DATA_UNAVAILABLE` ή λόγος στο `executions[].reason`).
+- 📝 Για το `DEPLOY.md`: LLM regression του v6 με το πραγματικό μοντέλο στο
+  VPS, **πριν** το επταήμερο dry-run.
+- Εκκρεμούν οι Φάσεις 3–5 (K12–K14, K17 μέρος, K19, K20 υπόλοιπο).
 
 ## 7. Εκκρεμότητες / TODO για την επόμενη συνεδρία
 
-- [ ] Φάσεις 2–5 του `FINISH_PLAN.md`.
+- [ ] Φάσεις 3–5 του `FINISH_PLAN.md`, μετά `DEPLOY.md`.
 - [ ] Αν προσθέσετε νέα αρχεία Python που γράφουν/διαβάζουν HMAC,
   **βεβαιώσου ότι κάνουν import από `signing.py`** — ποτέ δεύτερη
   υλοποίηση.
@@ -187,4 +220,4 @@ pytest            # από τη ρίζα του repo — οπουδήποτε, �
 
 ---
 
-_Τελευταία ενημέρωση: Φάση 1 του FINISH_PLAN (ασφάλεια)_
+_Τελευταία ενημέρωση: Φάση 2 του FINISH_PLAN (διαδρομή εκτέλεσης)_

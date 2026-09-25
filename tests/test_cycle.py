@@ -394,3 +394,155 @@ def test_regression_uses_same_command(env, monkeypatch):
     run_regression.call_hermes("p", cfg, timeout=5)
     assert seen["cmd"] == ryc.build_agent_command(cfg)
     assert seen["kw"]["input"] == "p"
+
+
+# =========================================================================== #
+# Phase 2 — execution path                                                     #
+# =========================================================================== #
+
+from helpers import order  # noqa: E402
+
+LIVE = dict(DRY_RUN=False, SIMULATED_IDLE_BALANCE=None)
+
+
+def placed_orders(rec):
+    return [e for e in rec["executions"] if e.get("would_call")]
+
+
+# --- T2.4: unreadable data fails closed ------------------------------------ #
+
+def test_positions_error_with_existing_position_means_zero_stake(env):
+    """Positions unreadable while a position exists: the cap cannot subtract
+    it, so staking would go over MAX_PER_PRODUCT_USD. Fail closed."""
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(positions=[position("1", amount="5")], fail={"get_earn_positions"})
+    agent = FakeAgent(reply_with(STAKE_1))
+    rec, rc = run(env, tool=tool, agent=agent, MAX_PER_PRODUCT_USD=10)
+    assert stake_executions(rec) == [] or not placed_orders(rec)
+    assert all(e["action"] != "STAKE" or not e.get("would_call") for e in rec["executions"])
+    assert any(a.startswith("DATA_UNAVAILABLE: positions") for a in rec["alerts"])
+    assert blocking_alerts(rec) == []  # a network blip must not freeze the heartbeat
+
+
+def test_positions_error_live_places_nothing(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(positions=[position("1", amount="5")], fail={"get_earn_positions"})
+    rec, rc = run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert tool.placed == []
+
+
+@pytest.mark.parametrize("failing", ["get_wallet_balance", "get_earn_orders"])
+def test_balance_or_orders_error_blocks_stake(env, failing):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(fail={failing})
+    rec, rc = run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert tool.placed == []
+    assert any(a.startswith("DATA_UNAVAILABLE") for a in rec["alerts"])
+    assert blocking_alerts(rec) == []
+
+
+def test_products_error_is_not_config_incomplete(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    rec, rc = run(env, tool=FakeBybit(fail={"get_earn_products"}))
+    assert any(a.startswith("DATA_UNAVAILABLE: products") for a in rec["alerts"])
+    assert blocking_alerts(rec) == []
+
+
+def test_balance_error_still_allows_redeem(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(products=[product("1", status="NotAvailable")],
+                     positions=[position("1", amount="5")], fail={"get_wallet_balance"})
+    rec, _ = run(env, tool=tool, **LIVE)
+    assert [(c[1], c[2], c[3]) for c in tool.calls] == [("Redeem", "1", "5")]
+
+
+# --- T2.1 / T2.5: place-order request -------------------------------------- #
+
+def test_live_stake_uses_place_order(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit()
+    rec, _ = run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    [req] = tool.placed
+    assert req["method"] == "POST" and req["path"] == "/v5/earn/place-order"
+    body = req["body"]
+    assert body["category"] == "FlexibleSaving" and body["orderType"] == "Stake"
+    assert body["accountType"] == "UNIFIED" and body["coin"] == "USDT"
+    assert body["productId"] == "1" and body["amount"] == "5"
+    [ex] = placed_orders(rec)
+    assert ex["executed"] is True and ex["response"]["orderId"] == "oid-1"
+    assert ex["order_link_id"] == body["orderLinkId"]
+
+
+def test_dry_run_would_call_equals_live_request(env):
+    """T2.5: the dry-run record is exactly the request live mode sends."""
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    from executor import Executor
+    orders_ = [{"action": "STAKE", "coin": "USDT", "product_id": "1", "amount": "5",
+                "origin": "agent", "reason": "x"}]
+    [dry] = Executor(dry_run=True, allow_new_positions=True, account_type="UNIFIED",
+                     cycle_id="c1").execute(orders_)
+    tool = FakeBybit()
+    [live] = Executor(bybit_tool=tool, dry_run=False, allow_new_positions=True,
+                      account_type="UNIFIED", cycle_id="c1").execute(orders_)
+    assert dry["executed"] is False
+    assert dry["would_call"] == live["would_call"] == tool.placed[0]
+
+
+# --- T2.2: pending orders -------------------------------------------------- #
+
+def test_pending_redeem_is_not_resent(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(products=[product("1", status="NotAvailable")],
+                     positions=[position("1", amount="5")],
+                     orders=[order("Redeem", "1", status="Pending")])
+    rec, _ = run(env, tool=tool, **LIVE)
+    assert tool.placed == []
+    assert any("pending" in e["reason"].lower() for e in rec["executions"])
+    assert rec["orders"][0]["status"] == "Pending"
+
+
+def test_pending_order_blocks_new_stake_in_that_coin(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(orders=[order("Stake", "1", status="Pending")])
+    run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert tool.placed == []
+
+
+def test_second_cycle_does_not_resend_after_live_order(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(products=[product("1", status="NotAvailable")],
+                     positions=[position("1", amount="5")])
+    run(env, tool=tool, **LIVE)
+    assert len(tool.placed) == 1
+    rec2, _ = run(env, tool=tool, **LIVE)
+    assert len(tool.placed) == 1  # the redeem is still Pending at Bybit
+    assert rec2["orders"][-1]["status"] == "Pending"
+
+
+def test_finished_orders_do_not_block(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(orders=[order("Stake", "1", status="Success"),
+                             order("Redeem", "1", status="Fail", link="x")])
+    run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert len(tool.placed) == 1
+
+
+def test_unknown_order_status_counts_as_pending(env):
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    tool = FakeBybit(orders=[order("Stake", "1", status="Processing")])
+    run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert tool.placed == []
+
+
+@pytest.mark.parametrize("bad", [{"amount": None}, {"amount": "abc"}, {"amount": "-1"},
+                                 {"productId": None}])
+def test_position_with_unreadable_fields_fails_closed(env, bad):
+    """A position whose amount (or product) cannot be read would count as 0
+    against the cap — same over-limit risk as an API failure."""
+    write_state(env["YIELD_STATE_FILE"], "NORMAL")
+    pos = {**position("1", amount="5"), **bad}
+    pos = {k: v for k, v in pos.items() if v is not None}
+    tool = FakeBybit(positions=[pos])
+    rec, _ = run(env, tool=tool, agent=FakeAgent(reply_with(STAKE_1)), **LIVE)
+    assert tool.placed == []
+    assert any(a.startswith("DATA_UNAVAILABLE: positions") for a in rec["alerts"])

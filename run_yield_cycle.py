@@ -45,7 +45,7 @@ import yaml
 
 import risk_state
 import settings
-from bybit_earn_tool import BybitEarnTool
+from bybit_earn_tool import BybitAPIError, BybitEarnTool
 from executor import Executor
 
 ROOT = settings.ROOT
@@ -58,6 +58,8 @@ AGENT_TIMEOUT_S = 280
 AGENT_ACTIONS = ("STAKE", "REDEEM", "REDEEM_ALL", "HOLD", "ALERT_ONLY",
                  "NO_NEW_POSITIONS", "REJECTED_CROSS_COIN")
 MANDATORY_PARAMS = ["ENTRY_APR", "RESOLVED_MODEL", "ACCOUNT_TYPE"]
+# Bybit Earn order statuses that are final; anything else counts as pending.
+FINAL_ORDER_STATUSES = ("Success", "Fail")
 
 # (raw_stdout, session_id) = agent(prompt, cfg, cycle_id)
 Agent = Callable[[str, Dict[str, Any], str], Tuple[str, Optional[str]]]
@@ -101,16 +103,26 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     Pulls the data the agent needs, applies COIN_WHITELIST, and records each
     filter drop.  Returns a dict with: scan, positions, balances, filtered,
-    snapshot_meta, idle_per_coin, product_status.
+    snapshot_meta, idle_per_coin, product_status, orders, pending_coins,
+    data_errors.
+
+    Each Bybit source is read independently.  A failed read (BybitAPIError)
+    is recorded in `data_errors[source]`; it is NEVER replaced by an empty
+    list, so "no positions" and "positions unreadable" stay distinguishable.
 
     `product_status` maps every whitelisted product id Bybit returned to its
     status, including products dropped from `scan` — the wrapper needs it to
     exit positions in products that stopped being Available.
     """
     filtered: List[Dict[str, str]] = []
+    data_errors: Dict[str, str] = {}
     snapshot_ts = int(time.time() * 1000)
 
-    products = tool.get_earn_products() or []
+    try:
+        products = tool.get_earn_products()
+    except BybitAPIError as e:
+        data_errors["products"] = str(e)
+        products = []
     # Live-scan age anchor: the input to MAX_SCAN_AGE_SECONDS.
     product_fetch_ts_ms = int(time.time() * 1000)
     whitelist = list(cfg["COIN_WHITELIST"])
@@ -138,7 +150,11 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
                              "reason": f"STATUS_NOT_AVAILABLE: {status!r}"})
             continue
 
-        hist = tool.get_earn_apr_history(coin=coin) or []
+        try:
+            hist = tool.get_earn_apr_history(product_id=product_id)
+        except BybitAPIError as e:
+            filtered.append({"product_id": product_id, "reason": f"APR_HISTORY_UNAVAILABLE: {e}"})
+            continue
         if not hist:
             filtered.append({"product_id": product_id, "reason": "NO_APR_HISTORY"})
             continue
@@ -183,9 +199,13 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
         })
 
     # --- balances + positions (only for whitelisted coins) ---
-    balance_data = tool.get_wallet_balance(account_type=cfg["ACCOUNT_TYPE"]) or {}
     balances_summary: List[Dict] = []
     real_idle_per_coin: Dict[str, float] = {}
+    try:
+        balance_data = tool.get_wallet_balance(account_type=cfg["ACCOUNT_TYPE"])
+    except BybitAPIError as e:
+        data_errors["balance"] = str(e)
+        balance_data = {}
     if balance_data.get("list"):
         for c in balance_data["list"][0].get("coin", []):
             coin = c.get("coin")
@@ -200,14 +220,33 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
             })
 
     positions: List[Dict] = []
-    for coin in whitelist:
-        for p in tool.get_earn_positions(coin=coin) or []:
-            positions.append({
-                "product_id": str(p.get("productId")),
-                "coin": p.get("coin"),
-                "amount": _opt_float(p.get("amount")),
-                "status": p.get("status"),
-            })
+    try:
+        for coin in whitelist:
+            for p in tool.get_earn_positions(coin=coin):
+                pid, amount = _norm_id(p.get("productId")), _opt_float(p.get("amount"))
+                if pid is None or amount is None or amount < 0:
+                    # Counting it as 0 would let the per-product cap be exceeded.
+                    raise BybitAPIError(f"unreadable position {p!r}")
+                positions.append({
+                    "product_id": pid,
+                    "coin": p.get("coin"),
+                    "amount": amount,
+                    "status": p.get("status"),
+                })
+    except BybitAPIError as e:
+        data_errors["positions"] = str(e)
+        positions = []
+
+    orders: List[Dict] = []
+    try:
+        for o in tool.get_earn_orders():
+            orders.append({k: o.get(k) for k in ("orderId", "orderLinkId", "orderType", "coin",
+                                                  "productId", "orderValue", "status",
+                                                  "createdAt", "updatedAt")})
+    except BybitAPIError as e:
+        data_errors["orders"] = str(e)
+    pending_coins = sorted({o.get("coin") for o in orders
+                            if o.get("status") not in FINAL_ORDER_STATUSES})
 
     # DRY_RUN-only simulated balance substitution.
     balance_source = "real"
@@ -217,6 +256,7 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
                              "_note": "simulated (DRY_RUN)"} for coin in whitelist]
         real_idle_per_coin = {coin: float(sim) for coin in whitelist}
         balance_source = "simulated"
+        data_errors.pop("balance", None)  # the real balance is not used
 
     snapshot_meta = {
         "ts": snapshot_ts,
@@ -227,7 +267,8 @@ def collect_inputs(tool: BybitEarnTool, cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
     return {"scan": scan, "positions": positions, "balances": balances_summary,
             "filtered": filtered, "snapshot_meta": snapshot_meta,
-            "idle_per_coin": real_idle_per_coin, "product_status": product_status}
+            "idle_per_coin": real_idle_per_coin, "product_status": product_status,
+            "orders": orders, "pending_coins": pending_coins, "data_errors": data_errors}
 
 
 # --------------------------------------------------------------------------- #
@@ -438,10 +479,25 @@ def apply_risk_gate(decisions: List[Dict], effective_state: str) -> Tuple[List[D
     """Drop every STAKE unless the effective state is NORMAL."""
     if effective_state == "NORMAL":
         return decisions, []
+    return _drop_stakes(decisions, "RISK_GATE_DROPPED_STAKE", f"under {effective_state}")
+
+
+def apply_data_gate(decisions: List[Dict], data_errors: Dict[str, str]) -> Tuple[List[Dict], List[str]]:
+    """Drop every STAKE when positions, balance or orders could not be read.
+
+    The per-product cap subtracts the held position and pending orders
+    block duplicates; without those inputs a STAKE could exceed
+    MAX_PER_PRODUCT_USD or repeat an order. Fail closed."""
+    missing = sorted(k for k in ("positions", "balance", "orders") if k in data_errors)
+    if not missing:
+        return decisions, []
+    return _drop_stakes(decisions, "DATA_GATE_DROPPED_STAKE", f"({', '.join(missing)} unavailable)")
+
+
+def _drop_stakes(decisions: List[Dict], code: str, why: str) -> Tuple[List[Dict], List[str]]:
     kept = [d for d in decisions if d.get("action") != "STAKE"]
     dropped = len(decisions) - len(kept)
-    alerts = [f"RISK_GATE_DROPPED_STAKE: {dropped} STAKE dropped under {effective_state}"] if dropped else []
-    return kept, alerts
+    return kept, ([f"{code}: {dropped} STAKE dropped {why}"] if dropped else [])
 
 
 def unwind_decisions(cfg: Dict[str, Any]) -> List[Dict]:
@@ -514,10 +570,13 @@ def compute_stake_amount(idle: Decimal, held: Decimal, product: Dict,
 
 
 def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
-               positions: List[Dict], idle_per_coin: Dict[str, float]) -> Tuple[List[Dict], List[Dict]]:
+               positions: List[Dict], idle_per_coin: Dict[str, float],
+               pending_coins: Optional[List[str]] = None) -> Tuple[List[Dict], List[Dict]]:
     """Turn decisions into executable orders.  Returns (orders, skipped),
     where `skipped` are execution-shaped records explaining why a decision
-    produced no order."""
+    produced no order.  No order is planned in a coin that has a pending
+    Bybit order (T2.2) — a redemption can take up to 48 h."""
+    pending = set(pending_coins or [])
     scan_by_id = {p["product_id"]: p for p in scan}
     held: Dict[str, Decimal] = {}
     for p in positions:
@@ -536,6 +595,11 @@ def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
 
     def redeem(pid: str, coin: Optional[str], origin: str, reason: str) -> None:
         if pid in redeemed:
+            return
+        if coin in pending:
+            redeemed.add(pid)
+            skip({"action": "REDEEM", "coin": coin, "product_id": pid, "origin": origin},
+                 f"pending Bybit order in {coin}; no new order until it completes")
             return
         amount = held.get(pid)
         if amount is None or amount <= 0:
@@ -562,6 +626,10 @@ def build_plan(decisions: List[Dict], cfg: Dict[str, Any], scan: List[Dict],
                 continue
             product = scan_by_id[pid]
             coin = product["coin"]
+            if coin in pending:
+                staked.add(pid)
+                skip(d, f"pending Bybit order in {coin}; no new order until it completes")
+                continue
             amount, why = compute_stake_amount(idle.get(coin, Decimal(0)),
                                                held.get(pid, Decimal(0)), product, cfg)
             if amount is None:
@@ -648,6 +716,8 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
         "prompt_sha256": None,
         "model_requested_on_cli": cfg.get("RESOLVED_MODEL"),
         "snapshot_meta": None,
+        "orders": [],
+        "data_errors": {},
     }
 
     def finish(rc: int) -> Tuple[Dict, int]:
@@ -678,11 +748,24 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
         rec["decisions"] = [{"action": "ALERT_ONLY", "reason": f"data collection failed: {e}"}]
         return finish(2)
     scan, positions = data["scan"], data["positions"]
+    data_errors = data["data_errors"]
     rec["filtered_by_wrapper"] = data["filtered"]
     rec["snapshot_meta"] = data["snapshot_meta"]
     rec["balance_source"] = data["snapshot_meta"]["balance_source"]
+    rec["orders"] = data["orders"][-20:]
+    rec["data_errors"] = data_errors
+    alerts.extend(f"DATA_UNAVAILABLE: {src}: {err}" for src, err in sorted(data_errors.items()))
+    if data["pending_coins"]:
+        alerts.append(f"PENDING_ORDERS: {', '.join(map(str, data['pending_coins']))}")
 
-    if not scan and not positions:
+    if "positions" in data_errors:
+        # Without positions nothing can be sized or redeemed safely: no LLM,
+        # no orders this cycle (non-blocking; the next cycle retries).
+        rec["decisions"] = [{"action": "ALERT_ONLY",
+                             "reason": "positions unavailable; no orders this cycle"}]
+        return finish(0)
+
+    if not scan and not positions and not data_errors:
         alerts.append("CONFIG_INCOMPLETE: no products in COIN_WHITELIST survived filtering")
         rec["decisions"] = [{"action": "HOLD", "reason": "no whitelisted products available"}]
         return finish(0)
@@ -743,14 +826,20 @@ def run_cycle(cfg: Dict[str, Any], tool, agent: Agent = call_agent) -> Tuple[Dic
     # Deterministic gates — the last word before execution.
     decisions, gate_alerts = apply_risk_gate(decisions, effective)
     alerts.extend(gate_alerts)
+    decisions, gate_alerts = apply_data_gate(decisions, data_errors)
+    alerts.extend(gate_alerts)
+    allow_new_positions = effective == "NORMAL" and not any(
+        k in data_errors for k in ("positions", "balance", "orders"))
     forced = unavailable_redeems(positions, data["product_status"])
     decisions = forced + decisions
     rec["decisions"] = decisions
 
-    orders, skipped = build_plan(decisions, cfg, scan, positions, data["idle_per_coin"])
+    orders, skipped = build_plan(decisions, cfg, scan, positions, data["idle_per_coin"],
+                                 data["pending_coins"])
     rec["plan"] = orders
     executor = Executor(bybit_tool=tool, dry_run=cfg.get("DRY_RUN", True),
-                        allow_new_positions=(effective == "NORMAL"))
+                        allow_new_positions=allow_new_positions,
+                        account_type=cfg["ACCOUNT_TYPE"], cycle_id=cycle_id)
     rec["executions"] = executor.execute(orders) + skipped
     return finish(0)
 

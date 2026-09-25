@@ -2,16 +2,20 @@
 executor.py — dry-run vs live execution for Bybit Earn.
 
 The cycle runner (run_yield_cycle.py) builds a plan of orders — every amount
-already computed by the wrapper, never by the LLM — and hands it here.  The
-split exists for audit: every order is recorded with identical fields
-whether DRY_RUN is true or false; only the actual HTTP POST differs.
+already computed by the wrapper, never by the LLM — and hands it here.
 
-DRY_RUN=true:  we record what we *would* send. The tool is not called.
-DRY_RUN=false: we POST through bybit_earn_tool. The response is recorded.
+`would_call` is the exact request, built by
+bybit_earn_tool.place_order_request() in both modes:
+  DRY_RUN=true:  recorded, not sent.
+  DRY_RUN=false: sent verbatim via BybitEarnTool.place_order(); the
+                 response (orderId, orderLinkId) is recorded.
+
+A successful response means Bybit ACCEPTED the order, not that it is done:
+Earn orders are asynchronous (a redemption can take up to 48 h). The
+wrapper tracks them via GET /v5/earn/order on the following cycles.
 
 Defence in depth: a STAKE is refused unless the executor was built with
-allow_new_positions=True (i.e. the effective risk state is NORMAL), even if
-an upstream gate failed to drop it.
+allow_new_positions=True, even if an upstream gate failed to drop it.
 
 Order shape (from run_yield_cycle.build_plan):
   {"action": "STAKE" | "REDEEM", "coin": str, "product_id": str,
@@ -21,13 +25,20 @@ Order shape (from run_yield_cycle.build_plan):
 from datetime import datetime, timezone
 from typing import Dict, List
 
+from bybit_earn_tool import order_link_id, place_order_request
+
+ORDER_TYPES = {"STAKE": "Stake", "REDEEM": "Redeem"}
+
 
 class Executor:
     def __init__(self, bybit_tool=None, dry_run: bool = True,
-                 allow_new_positions: bool = False):
+                 allow_new_positions: bool = False, account_type: str = "UNIFIED",
+                 cycle_id: str = "nocycle"):
         self.tool = bybit_tool
         self.dry_run = dry_run
         self.allow_new_positions = allow_new_positions
+        self.account_type = account_type
+        self.cycle_id = cycle_id
 
     def execute(self, orders: List[Dict]) -> List[Dict]:
         return [self._execute_one(o) for o in orders]
@@ -35,34 +46,31 @@ class Executor:
     def _execute_one(self, order: Dict) -> Dict:
         action = order.get("action")
         product_id = order.get("product_id")
-        amount = order.get("amount")
         rec = {"ts": _now(), "action": action, "coin": order.get("coin"),
-               "product_id": product_id, "amount": amount,
-               "origin": order.get("origin"), "decision_reason": order.get("reason")}
+               "product_id": product_id, "amount": order.get("amount"),
+               "origin": order.get("origin"), "decision_reason": order.get("reason"),
+               "would_call": None, "order_link_id": None}
 
-        if action == "STAKE":
-            path, method = "/v5/earn/subscribe", "subscribe_earn_product"
-        elif action == "REDEEM":
-            path, method = "/v5/earn/redeem", "redeem_earn_product"
-        else:
-            return {**rec, "would_call": None, "executed": False,
-                    "reason": f"unknown action {action!r}; not handled"}
-
+        order_type = ORDER_TYPES.get(action)
+        if order_type is None:
+            return {**rec, "executed": False, "reason": f"unknown action {action!r}; not handled"}
         if action == "STAKE" and not self.allow_new_positions:
-            return {**rec, "would_call": None, "executed": False,
-                    "reason": "RISK_GATE: new positions not allowed in this risk state"}
+            return {**rec, "executed": False,
+                    "reason": "RISK_GATE: new positions not allowed in this cycle"}
 
-        would = {"method": "POST", "path": path,
-                 "params": {"productId": product_id, "amount": amount}}
-        rec["would_call"] = would
+        link = order_link_id(self.cycle_id, order_type, str(product_id))
+        request = place_order_request(order_type, self.account_type, order.get("coin"),
+                                      str(product_id), order.get("amount"), link)
+        rec.update(would_call=request, order_link_id=link)
         if self.dry_run or self.tool is None:
             return {**rec, "executed": False,
                     "reason": "DRY_RUN" if self.dry_run else "no tool wired"}
         try:
-            resp = getattr(self.tool, method)(product_id, amount)
-            return {**rec, "executed": True, "response": resp}
+            resp = self.tool.place_order(request)
+            return {**rec, "executed": True, "response": resp,
+                    "reason": "accepted by Bybit (asynchronous; tracked via /v5/earn/order)"}
         except Exception as e:
-            return {**rec, "executed": False, "error": str(e)}
+            return {**rec, "executed": False, "error": str(e), "reason": "place_order failed"}
 
 
 def _now() -> str:
