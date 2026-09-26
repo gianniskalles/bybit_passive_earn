@@ -250,20 +250,36 @@ def test_install_script_syntax():
 # --- DEPLOY.md guard rails --------------------------------------------------- #
 
 DEPLOY = (REPO / "DEPLOY.md").read_text()
+DEPLOY_SH = (REPO / "deploy" / "deploy.sh").read_text()
 
 
-def test_deploy_runs_regression_before_any_timer():
-    assert DEPLOY.index("tests/run_regression.py") < DEPLOY.index("deploy/install.sh")
+def test_deploy_is_one_command_and_a_log():
+    cmd = DEPLOY[DEPLOY.index("## Η εντολή"):DEPLOY.index("## Τι κάνει")]
+    assert "sudo -u hermes git pull --ff-only origin main" in cmd
+    assert "sudo deploy/deploy.sh" in cmd
+    assert "/opt/hermes/logs/deploy/deploy_" in cmd
 
 
-def test_deploy_step1_only_targets_yield_units():
-    step1 = DEPLOY[DEPLOY.index("## Βήμα 1"):DEPLOY.index("## Βήμα 2")]
-    assert "PAT='yield|heartbeat|run_yield_cycle'" in step1
-    assert "grep -iE 'yield|hermes'" not in step1
+def test_deploy_names_the_services_never_to_touch():
     for svc in ("hermes-gateway", "hermes-litellm", "hermes-george", "hermes-seo_agent"):
-        assert svc in step1
+        assert svc in DEPLOY and svc in DEPLOY_SH
+
+
+def test_deploy_sh_order_regression_before_systemd():
+    assert DEPLOY_SH.index("run_step 6") < DEPLOY_SH.index("run_step 7")
+    assert "run_regression.py" in DEPLOY_SH[DEPLOY_SH.index("step6_regression()"):
+                                            DEPLOY_SH.index("step7_systemd()")]
 
 
 def test_deploy_stops_before_testnet():
-    testnet = DEPLOY[DEPLOY.index("## Βήμα 8"):DEPLOY.index("## Βήμα 9")]
+    testnet = DEPLOY[DEPLOY.index("## Μετά — Testnet"):DEPLOY.index("## Μετά — Επταήμερο")]
     assert "ΣΤΑΜΑΤΑ" in testnet and "έγκριση" in testnet
+    assert "testnet" not in DEPLOY_SH.replace("Testnet is NOT part of this script", "") \
+        .replace("anything against testnet", "")
+
+
+def test_deploy_snippets_define_their_variables():
+    for block in DEPLOY.split("```bash")[1:]:
+        code = block.split("```")[0]
+        if "$PY" in code or "$REPO" in code:
+            assert "PY=/opt/hermes/.venv/bin/python" in code, code[:120]

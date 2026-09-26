@@ -117,5 +117,5 @@ be overridden with `YIELD_*` env vars (`settings.py`).
 | `notify.py`, `summary.py`, `telegram_bot.py` | Telegram alerts, daily summary, operator commands |
 | `settings.py` | paths and `.env` loading |
 | `prompt_v6.md` | production prompt (`archive/` for old ones) |
-| `deploy/` | systemd units and `install.sh` |
+| `deploy/` | systemd units, `install.sh`, `deploy.sh` (one-command deploy, see DEPLOY.md), `preflight.py` |
 | `scripts/testnet.py` | testnet capture / stake+redeem round trip |

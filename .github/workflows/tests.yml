@@ -23,3 +23,40 @@ jobs:
       # refuses every socket connect and points all paths into tmp_path.
       - name: pytest
         run: pytest -v
+
+  # Mimics the VPS: repo at /opt/hermes/yield_rotation, venv at
+  # /opt/hermes/.venv, user hermes, pytest run as that user, units verified.
+  vps-layout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create user hermes and the /opt/hermes layout
+        run: |
+          sudo useradd --system --home-dir /opt/hermes --shell /usr/sbin/nologin hermes
+          sudo mkdir -p /opt/hermes
+          sudo cp -a "$GITHUB_WORKSPACE" /opt/hermes/yield_rotation
+          sudo chown -R hermes:hermes /opt/hermes
+      - name: venv at /opt/hermes/.venv (as hermes)
+        run: |
+          sudo -u hermes python3 -m venv /opt/hermes/.venv
+          sudo -u hermes /opt/hermes/.venv/bin/pip install -q \
+            -r /opt/hermes/yield_rotation/requirements-dev.txt
+      - name: pytest as hermes, from /opt/hermes/yield_rotation
+        working-directory: /opt/hermes/yield_rotation
+        run: sudo -u hermes env HOME=/opt/hermes /opt/hermes/.venv/bin/python -m pytest -v -p no:cacheprovider
+      - name: systemd-analyze verify (units as shipped)
+        working-directory: /opt/hermes/yield_rotation
+        run: sudo systemd-analyze verify deploy/*.service deploy/*.timer
+      - name: install.sh, then verify the installed units
+        run: |
+          sudo /opt/hermes/yield_rotation/deploy/install.sh
+          sudo systemd-analyze verify /etc/systemd/system/yield-*.service /etc/systemd/system/yield-*.timer
+          for t in yield-cycle.timer yield-heartbeat.timer yield-summary.timer; do
+            test "$(systemctl is-enabled "$t")" = enabled
+          done
+          # Stop the timers again: the runner has no keys and no agent.
+          sudo systemctl disable --now yield-cycle.timer yield-heartbeat.timer yield-summary.timer
+      - name: deploy.sh syntax and refusal without root
+        run: |
+          bash -n /opt/hermes/yield_rotation/deploy/deploy.sh
+          ! bash /opt/hermes/yield_rotation/deploy/deploy.sh

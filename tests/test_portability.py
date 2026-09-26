@@ -7,6 +7,7 @@ process env -> profile .env (/opt/hermes/.env) -> from the shared
 """
 
 import json
+import shutil
 import os
 import subprocess
 import sys
@@ -18,11 +19,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _IMPORT_PROBE = r"""
 import importlib, json, os, site, sys
+module, forbidden = sys.argv[1], os.path.realpath(sys.argv[2])
 # The interpreter's own files (stdlib, site-packages) may legitimately live
-# under /opt — e.g. /opt/hostedtoolcache on GitHub runners. Only the
-# project's own behaviour is under test.
+# under /opt — e.g. /opt/hostedtoolcache on GitHub runners.
 own = tuple(os.path.realpath(p) for p in
             {sys.prefix, sys.base_prefix, sys.exec_prefix, *site.getsitepackages()})
+own += (OWN_REPO,)
 touched = []
 def hook(event, args):
     if event in ("open", "os.mkdir", "os.listdir", "os.scandir", "os.remove",
@@ -32,16 +34,18 @@ def hook(event, args):
             p = p.decode(errors="replace")
         if not isinstance(p, (str, os.PathLike)):
             return
-        p = str(p)
-        if p.startswith("/opt") and not os.path.realpath(p).startswith(own):
-            touched.append([event, p])
+        real = os.path.realpath(str(p))
+        if (real == forbidden or real.startswith(forbidden + os.sep)) and not any(
+                real == o or real.startswith(o + os.sep) for o in own):
+            touched.append([event, str(p)])
 sys.addaudithook(hook)
 env_before = dict(os.environ)
 path_before = list(sys.path)
-importlib.import_module(sys.argv[1])
+importlib.import_module(module)
 print(json.dumps({
     "touched": touched,
-    "opt_on_sys_path": [p for p in sys.path if p not in path_before and str(p).startswith("/opt")],
+    "opt_on_sys_path": [p for p in sys.path if p not in path_before
+                        and os.path.realpath(p).startswith(forbidden)],
     "env_added": sorted(set(os.environ) - set(env_before)),
 }))
 """
@@ -50,34 +54,68 @@ MODULES = ["run_yield_cycle", "heartbeat", "bybit_earn_tool", "executor", "signi
            "risk_state", "settings", "notify", "summary", "telegram_bot"]
 
 
-def _clean_env(**extra):
+def _clean_env(repo=REPO_ROOT, **extra):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-           "PYTHONPATH": str(REPO_ROOT), "LANG": "C.UTF-8"}
+           "PYTHONPATH": str(repo), "LANG": "C.UTF-8"}
     env.update(extra)
     return env
 
 
-@pytest.mark.parametrize("module", MODULES)
-def test_import_has_no_side_effects(module, tmp_path):
+def _probe(module, cwd, repo=REPO_ROOT, forbidden="/opt"):
+    """Import `module` from `repo` in a clean interpreter and report every
+    access under `forbidden` — except the interpreter's own files and the
+    repo's own files (the repo itself lives under /opt on the VPS)."""
+    code = _IMPORT_PROBE.replace("OWN_REPO", repr(os.path.realpath(repo)))
     proc = subprocess.run(
-        [sys.executable, "-c", _IMPORT_PROBE, module],
-        cwd=tmp_path, env=_clean_env(), capture_output=True, text=True, timeout=60,
+        [sys.executable, "-c", code, module, str(forbidden)],
+        cwd=cwd, env=_clean_env(repo), capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, f"import {module} failed:\n{proc.stderr}"
-    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_import_has_no_side_effects(module, tmp_path):
+    result = _probe(module, tmp_path)
     assert result["touched"] == [], f"import {module} touched /opt: {result['touched']}"
     assert result["opt_on_sys_path"] == [], f"import {module} put /opt on sys.path"
     assert result["env_added"] == [], f"import {module} wrote os.environ: {result['env_added']}"
 
 
+def _repo_copy_under_opt(tmp_path):
+    """The VPS layout: the repo at <root>/opt/hermes/yield_rotation."""
+    fake_opt = tmp_path / "opt"
+    repo = fake_opt / "hermes" / "yield_rotation"
+    shutil.copytree(REPO_ROOT, repo, ignore=shutil.ignore_patterns(
+        ".git", "__pycache__", ".pytest_cache", "*.pyc"))
+    return fake_opt, repo
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_probe_allows_repo_own_files_when_repo_lives_under_opt(module, tmp_path):
+    fake_opt, repo = _repo_copy_under_opt(tmp_path)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    result = _probe(module, cwd, repo=repo, forbidden=fake_opt)
+    assert result["touched"] == [], result["touched"]
+    assert result["opt_on_sys_path"] == []
+
+
+def test_probe_still_catches_access_next_to_the_repo(tmp_path):
+    """Excluding the repo must not exclude its neighbours (e.g. /opt/hermes/.env)."""
+    fake_opt, repo = _repo_copy_under_opt(tmp_path)
+    secret = fake_opt / "hermes" / ".env"
+    secret.write_text("HERMES_RISK_HMAC_KEY=x\n")
+    (repo / "reads_env_on_import.py").write_text(f"open({str(secret)!r}).read()\n")
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    result = _probe("reads_env_on_import", cwd, repo=repo, forbidden=fake_opt)
+    assert [e[1] for e in result["touched"]] == [str(secret)]
+
+
 def test_import_does_not_load_env_from_cwd(tmp_path):
     (tmp_path / ".env").write_text("BYBIT_API_KEY=from-cwd\nBYBIT_API_SECRET=from-cwd\n")
-    proc = subprocess.run(
-        [sys.executable, "-c", _IMPORT_PROBE, "bybit_earn_tool"],
-        cwd=tmp_path, env=_clean_env(), capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode == 0, proc.stderr
-    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    result = _probe("bybit_earn_tool", tmp_path)
     assert "BYBIT_API_KEY" not in result["env_added"]
 
 
