@@ -1,0 +1,10 @@
+[Unit]
+Description=Bybit Earn yield rotation — heartbeat every 5 minutes (offset from the cycle)
+
+[Timer]
+OnCalendar=*:2/5
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

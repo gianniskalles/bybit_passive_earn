@@ -1,0 +1,10 @@
+[Unit]
+Description=Bybit Earn yield rotation — every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

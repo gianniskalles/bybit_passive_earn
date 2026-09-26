@@ -1,80 +1,68 @@
 #!/usr/bin/env python3
-"""External heartbeat for risk_state.json — runs as a SEPARATE process/timer (A2).
+"""External heartbeat for risk_state.json — runs as a SEPARATE process/timer.
 
-Purpose: renew an EXPIRED risk_state so the yield cycle does not stall in
-NO_NEW_POSITIONS (which is what happens when risk_state goes stale — the
-wrapper treats stale/missing as NO_NEW_POSITIONS and, being the agent, the
-cycle can never re-enter NORMAL on its own).
+Purpose: keep a healthy system in NORMAL without giving the LLM, or the
+cycle itself, any way to open the door.  The heartbeat is the only
+automatic writer of risk_state.json; it never overrides an operator.
 
-This is the v5.3-approved decision table (per handoff §Heartbeat):
+Decision table (FINISH_PLAN A1-B, T1.3, T1.4):
 
-  risk_state file absent                    -> write NORMAL
-  NORMAL but stale                          -> write NORMAL
-  present, unverifiable (bad HMAC/unread.)  -> ABSTAIN + alert, never overwrite
-  non-NORMAL (UNWIND/NO_NEW_POSITIONS),
-    even stale                              -> ABSTAIN + alert, never overwrite
-  Bybit API unreachable                     -> ABSTAIN
+  Bybit API unreachable                         -> ABSTAIN
+  last cycle carries a blocking code            -> ABSTAIN + alert
+  risk_state file absent                        -> write NO_NEW_POSITIONS
+                                                   (source=heartbeat_bootstrap)
+  present but unverifiable (unreadable,
+    malformed, bad HMAC, no key)                -> ABSTAIN + alert, never overwrite
+  NO_NEW_POSITIONS with source=heartbeat_bootstrap
+    and a verified clean cycle AFTER its ts     -> write NORMAL (heartbeat_renew)
+  NORMAL + fresh                                -> nothing
+  NORMAL + stale, scanner alive                 -> write NORMAL (heartbeat_renew)
+  NORMAL + stale, scanner not alive             -> ABSTAIN + alert
+  anything else (operator states, UNWIND,
+    bootstrap without a clean cycle yet)        -> ABSTAIN (+ alert if stale)
 
-check_last_cycle_ok() blocks ONLY on the 5 hard-fail codes:
-  CONFIG_INCOMPLETE, CRITICAL, AGENT_PARSE_ERROR, DECISION_VALIDATION_FAILED,
-  CYCLE_MODEL_MISMATCH.
-It must NOT block on RISK_STATE_*, STALE_SCAN or CYCLE_LATENCY_HIGH — those
-are non-fatal, and blocking on them creates a deadlock (the heartbeat exists
-precisely to recover stale risk states / tolerate transient scan staleness).
+ABSTAIN never writes.  "Verified clean cycle" = the newest cycle record has
+no blocking code, verified THIS exact risk_state record (signature valid and
+the same ts), and ran after it.
 
-LOG_DIR is NOT guessed: it is read from the SAME config file the wrapper
-(run_yield_cycle.py) loads — config/yield_rotation.yaml.  If the configured
-LOG_DIR directory does not exist, that is a hard error (exit 3 + alert); it is
-NOT the same as "no cycle has run yet" (bootstrap).  The two are distinguished
-explicitly:
-  - LOG_DIR dir missing        -> error + alert (misconfig), do NOT write NORMAL
-  - LOG_DIR exists, no *.jsonl -> bootstrap, write NORMAL
+check_last_cycle_ok() blocks ONLY on BLOCKING_CODES.  It must NOT block on
+RISK_STATE_*, RISK_GATE_*, STALE_SCAN or CYCLE_LATENCY_HIGH — those are
+non-fatal, and blocking on them creates a deadlock.
 
-Environment (each falls back to /opt/hermes/.env and /opt/data/.env):
+LOG_DIR is read from the SAME config file as the wrapper.  A missing LOG_DIR
+directory is a misconfig (exit 3 + alert), never treated as bootstrap.
+
+Environment (settings.load_env: process env > /opt/hermes/.env; the shared
+/opt/data/.env contributes TELEGRAM_BOT_TOKEN only):
   HERMES_RISK_HMAC_KEY  (required to sign/verify)
   BYBIT_API_KEY, BYBIT_API_SECRET, BYBIT_TESTNET
-  ALERT_TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+  TELEGRAM_BOT_TOKEN; chat id from config ALERT_TELEGRAM_CHAT_ID (env overrides)
 
-Test-only overrides (never set in production):
-  YIELD_STATE_FILE       absolute path to a risk_state.json (default prod path)
-  YIELD_CONFIG_FILE      absolute path to config/yield_rotation.yaml
-  YIELD_LOG_DIR          override dir containing *.jsonl (test only)
+Alerts go through notify.Notifier: one message per change of condition,
+a reminder at most every 6 hours, and a "back to normal" when it clears.
+
+Test-only switches (never set in production):
+  YIELD_LOG_DIR          override dir containing *.jsonl
   YIELD_SKIP_API_CHECK=1 skip the Bybit reachability probe
-  YIELD_SKIP_CONFIG_DCHECK=1  skip the "LOG_DIR must exist" error (test only)
+  YIELD_SKIP_CONFIG_DCHECK=1  skip the "LOG_DIR must exist" error
 """
 
 import json
 import os
 import sys
 import time
-import subprocess
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
-# Shared signing is the single source of truth. Add the repo dir so this
-# script (which lives in the repo) imports the SAME module as risk_state.py.
-_REPO_DIR = Path("/opt/hermes/yield_rotation")
-if str(_REPO_DIR) not in sys.path:
-    sys.path.insert(0, str(_REPO_DIR))
-from signing import sign, verify  # noqa: E402  (single source of truth)
+import notify
+import risk_state
+import settings
+from notify import Notifier
 
-# ---- Paths ----
-HERMES_DIR = Path("/opt/hermes")
-YIELD_DIR = HERMES_DIR / "yield_rotation"
-STATE_DIR = HERMES_DIR / "state"
-DEFAULT_STATE_FILE = STATE_DIR / "risk_state.json"
-DEFAULT_CONFIG_FILE = YIELD_DIR / "config" / "yield_rotation.yaml"
-
-RISK_STATE_FILE = Path(os.environ.get("YIELD_STATE_FILE", DEFAULT_STATE_FILE))
-CONFIG_FILE = Path(os.environ.get("YIELD_CONFIG_FILE", DEFAULT_CONFIG_FILE))
-SKIP_API_CHECK = os.environ.get("YIELD_SKIP_API_CHECK", "") == "1"
-# Test-only escape hatch (defaults: prod enforces LOG_DIR existence).
-SKIP_CONFIG_DCHECK = os.environ.get("YIELD_SKIP_CONFIG_DCHECK", "") == "1"
-
-# ---- Constants ----
-MAX_AGE_MS = 30 * 60 * 1000  # 30 minutes — same as risk_state.py verify()
+MAX_AGE_MS = risk_state.MAX_AGE_MS
 
 # The ONLY cycle-log codes that block the heartbeat. See module docstring.
 BLOCKING_CODES = (
@@ -82,7 +70,7 @@ BLOCKING_CODES = (
     "CRITICAL",
     "AGENT_PARSE_ERROR",
     "DECISION_VALIDATION_FAILED",
-    "CYCLE_MODEL_MISMATCH",
+    "CYCLE_CRASH",
 )
 
 
@@ -92,364 +80,224 @@ def load_config(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def resolve_log_dir(cfg: dict, env) -> Path:
-    """Return the LOG_DIR: from config (wrapper source of truth), with a
-    test-only env override. Raises on non-existent directory unless the test
-    escape hatch or an override forces a path."""
-    cfg_dir = cfg.get("LOG_DIR") or str(DEFAULT_LOG_DIR_FALLBACK())
-    # Test-only: allow an override dir for the *_dir_missing_* tests.
+def resolve_log_dir(cfg: dict) -> Path:
+    """LOG_DIR from config (wrapper source of truth), with a test-only env
+    override. Raises on a non-existent directory unless the test escape
+    hatch is set."""
+    cfg_dir = cfg.get("LOG_DIR") or str(settings.default_log_dir())
     override = os.environ.get("YIELD_LOG_DIR", "")
     chosen = Path(override) if override else Path(cfg_dir)
-
-    missing = not chosen.exists() or not chosen.is_dir()
-    if missing and not SKIP_CONFIG_DCHECK:
+    missing = not chosen.is_dir()
+    if missing and os.environ.get("YIELD_SKIP_CONFIG_DCHECK", "") != "1":
         raise FileNotFoundError(
-            f"LOG_DIR from config {CONFIG_FILE.name!r}: {chosen} does not exist. "
+            f"LOG_DIR from config {settings.config_file().name!r}: {chosen} does not exist. "
             f"This is a MISCONFIG — refusing to treat it as bootstrap."
         )
     return chosen
 
 
-def DEFAULT_LOG_DIR_FALLBACK() -> Path:
-    return Path("/opt/hermes/logs/yield_rotation")
-
-
-def load_env(path: Path | str) -> dict:
-    """Load KEY=VAL from .env file."""
-    p = Path(path) if not isinstance(path, Path) else path
-    try:
-        content = p.read_text()
-    except PermissionError:
-        if os.geteuid() == 0:
-            try:
-                result = subprocess.run(
-                    ["sudo", "-u", "hermes", "cat", str(p)],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.returncode == 0:
-                    content = result.stdout
-                else:
-                    return {}
-            except Exception:
-                return {}
-        else:
-            return {}
-    env = {}
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line:
-            k, v = line.split("=", 1)
-            env[k.strip()] = v.strip()
-    return env
-
-
-def write_risk_state(hmac_key: str, state: str, reason: str) -> dict:
-    """Atomically write risk_state.json with signature. Returns the written dict."""
-    ts = int(time.time() * 1000)
-    obj = {
-        "profile": "hermes-yield-rotation",
-        "state": state,
-        "ts": ts,
-        "reason": reason,
-    }
-    obj["sig"] = sign(hmac_key, obj)
-    tmp = RISK_STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(obj, separators=(",", ":")))
-    tmp.replace(RISK_STATE_FILE)
-    return obj
-
-
-def read_risk_state() -> dict | None:
-    """Return parsed risk_state dict, or None if absent/unreadable."""
-    if not RISK_STATE_FILE.exists():
-        return None
-    try:
-        return json.loads(RISK_STATE_FILE.read_text())
-    except Exception:
-        return None
-
-
 def check_bybit_api() -> bool:
-    """Verify Bybit API is reachable (products + positions)."""
+    """Verify the Bybit public API is reachable."""
     try:
-        sys.path.insert(0, str(YIELD_DIR))
         from bybit_earn_tool import BybitEarnTool
-        tool = BybitEarnTool()
-        products = tool.get_earn_products()
+        products = BybitEarnTool().get_earn_products()
         return bool(products and isinstance(products, list))
     except Exception:
         return False
 
 
-def _is_blocking_code(alert: str) -> str | None:
+def _is_blocking_code(alert: Any) -> Optional[str]:
     """Return the blocking code if this alert is a hard-fail, else None."""
-    a = (alert or "").strip()
+    if not isinstance(alert, str):
+        return None
+    a = alert.strip()
     for code in BLOCKING_CODES:
         if a == code or a.startswith(code + ":"):
             return code
     return None
 
 
-def check_last_cycle_ok(log_dir: Path) -> tuple[bool, str | None]:
-    """
-    Check the last yield cycle for a hard-fail code.
-
-    Returns (ok: bool, blocking_code_or_None).
-    - LOG_DIR directory exists but contains no *.jsonl -> bootstrap -> OK.
-    - LOG_DIR *directory missing* is handled by resolve_log_dir() BEFORE this
-      (raises -> misconfig error). We never get here with a missing dir.
-    - Non-blocking alerts (RISK_STATE_*, STALE_SCAN, CYCLE_LATENCY_HIGH) never
-      cause a block — deadlock guard.
-    """
+def last_cycle_record(log_dir: Path) -> Optional[Dict[str, Any]]:
+    """The newest cycle record, or None if there is none / it is unreadable."""
     logs = sorted(log_dir.glob("*.jsonl"))
     if not logs:
-        return True, None  # no cycle has run yet -> bootstrap
-    latest_log = logs[-1]
+        return None
     try:
-        lines = latest_log.read_text().strip().splitlines()
-        if not lines:
-            return True, None  # empty file -> nothing to block on
-        last = json.loads(lines[-1])
+        lines = logs[-1].read_text().strip().splitlines()
+        rec = json.loads(lines[-1]) if lines else None
     except Exception:
-        # Unreadable last log. Do not assume success, but also not one of the
-        # explicit hard-fail codes — treat as bootstrap-ish (no block).
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def check_last_cycle_ok(log_dir: Path) -> Tuple[bool, Optional[str]]:
+    """(ok, blocking_code). No readable cycle -> ok (nothing to block on)."""
+    rec = last_cycle_record(log_dir)
+    if rec is None:
         return True, None
-    for alert in last.get("alerts", []):
+    alerts = rec.get("alerts")
+    if isinstance(alerts, str):
+        alerts = [alerts]
+    if not isinstance(alerts, list):
+        return True, None
+    for alert in alerts:
         code = _is_blocking_code(alert)
         if code is not None:
             return False, code
     return True, None
 
 
-def get_current_risk_state() -> str | None:
-    """Read current risk state (from the file), or None if absent/unreadable."""
-    rs = read_risk_state()
-    if not rs:
+def _cycle_ts_ms(rec: Dict[str, Any]) -> Optional[int]:
+    ts = rec.get("ts")
+    if not isinstance(ts, str) or not ts:
         return None
-    return rs.get("state")
-
-
-def latest_cycle_age_ms(log_dir: Path) -> int | None:
-    """Age (ms) of the newest cycle-log decision, or None if there is no
-    readable cycle log.  None means 'the scanner has produced no decision we
-    can see' — treated as scanner-not-alive (fail-closed)."""
-    logs = sorted(log_dir.glob("*.jsonl"))
-    if not logs:
-        return None
-    latest = logs[-1]
     try:
-        lines = latest.read_text().strip().splitlines()
-        if not lines:
-            return None
-        rec = json.loads(lines[-1])
-        ts = rec.get("ts")
-        if not ts:
-            return None
-        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return int((datetime.now(timezone.utc) - dt).total_seconds() * 1000)
-    except Exception:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def latest_cycle_age_ms(log_dir: Path) -> Optional[int]:
+    """Age (ms) of the newest cycle record, or None if there is none."""
+    rec = last_cycle_record(log_dir)
+    ts = _cycle_ts_ms(rec) if rec else None
+    return None if ts is None else int(time.time() * 1000) - ts
 
 
 def scanner_alive(log_dir: Path, alive_window_ms: int) -> bool:
-    """True iff the scanner produced a decision recently (latest cycle log is
-    non-blocking — guaranteed by check_last_cycle_ok above — and within the
-    liveness window).  This is the Q2 guard: the heartbeat renews a stale
-    NORMAL ONLY when it has EXTERNAL evidence the scanner is alive, never
-    merely because the heartbeat itself runs."""
+    """True iff the scanner produced a decision within the liveness window.
+    The heartbeat renews only with EXTERNAL evidence the scanner is alive,
+    never merely because the heartbeat itself runs."""
     age = latest_cycle_age_ms(log_dir)
-    if age is None:
-        return False  # no decision at all -> scanner not alive
-    return 0 <= age < alive_window_ms
+    return age is not None and 0 <= age < alive_window_ms
 
 
-def has_verified_cycle_ever(log_dir: Path) -> bool:
-    """True iff at least ONE verified (non-blocking) supervision cycle has ever
-    completed — i.e. a *.jsonl exists whose last record is non-blocking.
-    Bootstrap gate: fail-closed (NO_NEW_POSITIONS) while this is False, so a
-    brand-new never-run system does NOT start in NORMAL."""
-    logs = sorted(log_dir.glob("*.jsonl"))
-    if not logs:
+def clean_cycle_verified(log_dir: Path, state_ts: int) -> bool:
+    """True iff the newest cycle is non-blocking, verified exactly this
+    risk_state record, and ran after it."""
+    rec = last_cycle_record(log_dir)
+    if rec is None or not check_last_cycle_ok(log_dir)[0]:
         return False
-    ok, _ = check_last_cycle_ok(log_dir)
-    return ok
-
-
-def is_risk_state_fresh(rs: dict) -> bool:
-    """Check if risk state timestamp is within MAX_AGE_MS."""
-    if not rs or "ts" not in rs:
+    meta = rec.get("risk_state_meta")
+    if not isinstance(meta, dict):
         return False
-    age = int(time.time() * 1000) - rs["ts"]
-    return age < MAX_AGE_MS
+    cycle_ts = _cycle_ts_ms(rec)
+    return (meta.get("signature_valid") is True
+            and meta.get("ts") == state_ts
+            and cycle_ts is not None and cycle_ts > state_ts)
 
 
 def send_telegram_alert(bot_token: str, chat_id: str, text: str) -> bool:
-    """Send a simple Telegram message via Bot API."""
-    try:
-        import urllib.request
-        import urllib.parse
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
-        req = urllib.request.Request(url, data=data)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
+    """The Telegram sender (notify.send_telegram); a module attribute so tests
+    can replace it."""
+    return notify.send_telegram(bot_token, chat_id, text)
 
 
 def main() -> int:
-    # Load .env files, but let the process environment win (test overrides).
-    env1 = load_env(HERMES_DIR / ".env")
-    env2 = load_env(Path("/opt/data/.env"))
-    merged = {**env1, **env2}
-    env = {k: v for k, v in merged.items() if k not in os.environ}
-    env.update({k: v for k, v in os.environ.items() if k in merged or k in
-                ("HERMES_RISK_HMAC_KEY", "YIELD_STATE_FILE", "YIELD_CONFIG_FILE",
-                 "YIELD_LOG_DIR", "YIELD_SKIP_API_CHECK", "YIELD_SKIP_CONFIG_DCHECK")})
+    env = settings.load_env()
+    cfg: Dict[str, Any] = {}
+    try:
+        cfg = load_config(settings.config_file())
+    except Exception:
+        pass  # reported by _decide
+    rc, condition, text = _decide(env)
+    notifier = Notifier(env, cfg if isinstance(cfg, dict) else {},
+                        sender=lambda t, c, x: send_telegram_alert(t, c, x))
+    notifier.observe("heartbeat", condition, text,
+                     resolved_text=None if condition else "✅ HEARTBEAT: back to normal")
+    return rc
+
+
+def _decide(env: Dict[str, str]) -> Tuple[int, Optional[str], str]:
+    """One heartbeat decision. Returns (exit_code, alert_condition, text);
+    alert_condition is None when everything is healthy."""
+    state_file = settings.risk_state_file()
+    config_file = settings.config_file()
 
     hmac_key = env.get("HERMES_RISK_HMAC_KEY")
     if not hmac_key:
         print("[heartbeat] ERROR: HERMES_RISK_HMAC_KEY not set", file=sys.stderr)
-        return 1
+        return 1, "no_hmac_key", "🚨 HEARTBEAT ERROR: HERMES_RISK_HMAC_KEY not set"
 
-    # LOG_DIR comes from the SAME config as the wrapper. Missing dir = hard error.
     try:
-        cfg = load_config(CONFIG_FILE)
-        log_dir = resolve_log_dir(cfg, env)
+        cfg = load_config(config_file)
+        log_dir = resolve_log_dir(cfg)
     except FileNotFoundError as e:
         print(f"[heartbeat] ERROR: {e}", file=sys.stderr)
-        bot_token = env.get("TELEGRAM_BOT_TOKEN")
-        chat_id = env.get("ALERT_TELEGRAM_CHAT_ID")
-        if bot_token and chat_id:
-            send_telegram_alert(
-                bot_token, chat_id,
-                f"🚨 HEARTBEAT ERROR: {e}",
-            )
-        return 3  # distinct: misconfig, NOT bootstrap
+        return 3, "log_dir_missing", f"🚨 HEARTBEAT ERROR: {e}"
     except Exception as e:
-        print(f"[heartbeat] ERROR: cannot read config {CONFIG_FILE}: {e}", file=sys.stderr)
-        return 3
+        print(f"[heartbeat] ERROR: cannot read config {config_file}: {e}", file=sys.stderr)
+        return 3, "config_unreadable", f"🚨 HEARTBEAT ERROR: cannot read config: {e}"
 
-    # Condition 1: Bybit API reachable (skippable for tests).
-    if not SKIP_API_CHECK and not check_bybit_api():
+    if os.environ.get("YIELD_SKIP_API_CHECK", "") != "1" and not check_bybit_api():
         print("[heartbeat] ABSTAIN: Bybit API unreachable")
-        return 0  # Not an error — just don't write
+        return 0, "bybit_unreachable", "⚠️ HEARTBEAT ABSTAIN: Bybit API unreachable."
 
-    # Condition 2: last cycle must not have a hard-fail code.
     cycle_ok, block_code = check_last_cycle_ok(log_dir)
     if not cycle_ok:
         print(f"[heartbeat] ABSTAIN: last cycle blocked by {block_code}")
-        bot_token = env.get("TELEGRAM_BOT_TOKEN")
-        chat_id = env.get("ALERT_TELEGRAM_CHAT_ID")
-        if bot_token and chat_id:
-            send_telegram_alert(
-                bot_token, chat_id,
-                f"⚠️ HEARTBEAT ABSTAIN: last cycle hard-failed ({block_code}). "
-                f"Risk state NOT renewed."
-            )
-        return 0
+        return 0, f"cycle_blocked:{block_code}", (
+            f"⚠️ HEARTBEAT ABSTAIN: last cycle hard-failed ({block_code}). Risk state NOT renewed.")
 
-    # Condition 3: risk state matrix.
-    rs = read_risk_state()
+    interval_min = cfg.get("CYCLE_INTERVAL_MINUTES", 10)
+    if not isinstance(interval_min, (int, float)) or interval_min <= 0:
+        interval_min = 10
+    scanner_window_ms = max(MAX_AGE_MS, int(3 * interval_min * 60 * 1000))
 
-    # Q1/Q2 liveness window: the scanner must have reported within 3 cycle
-    # intervals to be considered alive.  Read from the SAME config as the
-    # wrapper (never guessed).
-    interval_min = int(cfg.get("CYCLE_INTERVAL_MINUTES", 10) or 10)
-    scanner_window_ms = max(MAX_AGE_MS, 3 * interval_min * 60 * 1000)
-    alive = scanner_alive(log_dir, scanner_window_ms)
+    v = risk_state.verify(state_file, hmac_key)
 
-    # File absent -> bootstrap.
-    if rs is None:
-        if has_verified_cycle_ever(log_dir):
-            # A validated supervision cycle has completed before (state file
-            # just vanished).  Re-establish NORMAL — the system was running.
-            write_risk_state(hmac_key, "NORMAL", "heartbeat (was missing, verified cycle seen)")
-            print("[heartbeat] WROTE: NORMAL (was missing; verified cycle seen)")
-            return 0
-        # Brand-new, never-run, or no verified cycle ever -> FAIL-CLOSED.
-        # Door is not opened until ONE verified supervision cycle completes.
-        write_risk_state(hmac_key, "NO_NEW_POSITIONS",
-                         "heartbeat bootstrap: no verified supervision cycle yet")
-        print("[heartbeat] WROTE: NO_NEW_POSITIONS (bootstrap, no verified cycle)")
-        return 0
+    if v.code == risk_state.CODE_MISSING:
+        # Fail-closed bootstrap: promoted to NORMAL only after a verified
+        # clean cycle has seen this exact record.
+        risk_state.write(state_file, hmac_key, "NO_NEW_POSITIONS",
+                         "heartbeat bootstrap: no verified supervision cycle yet",
+                         risk_state.SOURCE_BOOTSTRAP)
+        print("[heartbeat] WROTE: NO_NEW_POSITIONS (bootstrap)")
+        return 0, None, ""
 
-    # Present but unverifiable -> ABSTAIN + alert, never overwrite.
-    payload = {k: v for k, v in rs.items() if k != "sig"}
-    if not verify(hmac_key, payload, rs.get("sig", "")):
-        print("[heartbeat] ABSTAIN: present but unverifiable (bad HMAC/unreadable)")
-        bot_token = env.get("TELEGRAM_BOT_TOKEN")
-        chat_id = env.get("ALERT_TELEGRAM_CHAT_ID")
-        if bot_token and chat_id:
-            send_telegram_alert(
-                bot_token, chat_id,
-                "⚠️ HEARTBEAT ABSTAIN: risk_state present but unverifiable "
-                "(bad HMAC/unreadable). NOT overwritten."
-            )
-        return 0
+    if not v.signature_valid:
+        print(f"[heartbeat] ABSTAIN: risk_state unverifiable ({v.code}: {v.detail})")
+        return 0, f"unverifiable:{v.code}", (
+            f"⚠️ HEARTBEAT ABSTAIN: risk_state unverifiable ({v.code}: {v.detail}). NOT overwritten.")
 
-    current_state = rs.get("state")
+    age_min = max(0, (v.age_ms or 0) // 60000)
 
-    # Non-NORMAL (even stale) -> ABSTAIN + alert, never overwrite.
-    if current_state and current_state != "NORMAL":
-        reason_info = "STALE" if not is_risk_state_fresh(rs) else "fresh"
-        print(f"[heartbeat] ABSTAIN: active non-NORMAL state "
-              f"({current_state}, {reason_info})")
-        if not is_risk_state_fresh(rs):
-            age_min = max(0, (int(time.time() * 1000) - int(rs["ts"])) // 60000)
-            bot_token = env.get("TELEGRAM_BOT_TOKEN")
-            chat_id = env.get("ALERT_TELEGRAM_CHAT_ID")
-            if bot_token and chat_id:
-                send_telegram_alert(
-                    bot_token, chat_id,
-                    f"⚠️ HEARTBEAT ALERT: risk state is {current_state} "
-                    f"and STALE ({age_min} min old). Heartbeat did NOT renew."
-                )
-        return 0
+    if (v.state == "NO_NEW_POSITIONS" and v.source == risk_state.SOURCE_BOOTSTRAP
+            and scanner_alive(log_dir, scanner_window_ms)
+            and clean_cycle_verified(log_dir, v.ts)):
+        risk_state.write(state_file, hmac_key, "NORMAL",
+                         "heartbeat: bootstrap promoted after verified clean cycle",
+                         risk_state.SOURCE_RENEW)
+        print("[heartbeat] WROTE: NORMAL (bootstrap promoted after verified clean cycle)")
+        return 0, None, ""
 
-    # NORMAL and fresh -> nothing to do.
-    if is_risk_state_fresh(rs):
+    if v.state != "NORMAL":
+        print(f"[heartbeat] ABSTAIN: {v.state} (source={v.source}, {v.code})")
+        if not v.fresh:
+            return 0, f"stale_non_normal:{v.state}:{v.source}", (
+                f"⚠️ HEARTBEAT ALERT: risk state is {v.state} (source={v.source}) and STALE "
+                f"({age_min} min old). Heartbeat did NOT renew.")
+        return 0, None, ""
+
+    if v.fresh:
         print("[heartbeat] OK: state is NORMAL and fresh")
-        return 0
+        return 0, None, ""
 
-    # NORMAL but stale -> renew ONLY if scanner is alive (produced a recent decision).
-    # This is the Q2 liveness guard: heartbeat must NOT renew merely because it runs;
-    # it must have EXTERNAL evidence that the scanner is producing decisions.
     if not scanner_alive(log_dir, scanner_window_ms):
-        age_min = max(0, (int(time.time() * 1000) - int(rs["ts"])) // 60000)
-        # Preserve state and timestamp, but update reason to indicate abstain.
-        abstain_obj = {
-            "profile": rs["profile"],
-            "state": rs["state"],
-            "ts": rs["ts"],
-            "reason": f"heartbeat ABSTAIN: scanner not alive (no recent decision)"
-        }
-        abstain_obj["sig"] = sign(hmac_key, abstain_obj)
-        tmp = RISK_STATE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(abstain_obj, separators=(",", ":")))
-        tmp.replace(RISK_STATE_FILE)
-        print(f"[heartbeat] ABSTAIN: NORMAL but stale ({age_min} min) AND scanner not alive (no recent decision). NOT renewing.")
-        bot_token = env.get("TELEGRAM_BOT_TOKEN")
-        chat_id = env.get("ALERT_TELEGRAM_CHAT_ID")
-        if bot_token and chat_id:
-            send_telegram_alert(
-                bot_token, chat_id,
-                f"⚠️ HEARTBEAT ABSTAIN: risk state is NORMAL but STALE ({age_min} min) "
-                f"AND scanner has not produced a recent decision. Risk state NOT renewed."
-            )
-        return 0
+        print(f"[heartbeat] ABSTAIN: NORMAL but stale ({age_min} min) AND scanner "
+              f"not alive (no recent decision). NOT renewing.")
+        return 0, "scanner_dead", (
+            f"⚠️ HEARTBEAT ABSTAIN: risk state is NORMAL but STALE ({age_min} min) AND the "
+            f"scanner has not produced a recent decision. Risk state NOT renewed.")
 
-    # Scanner is alive -> safe to renew stale NORMAL.
-    age_min = max(0, (int(time.time() * 1000) - int(rs["ts"])) // 60000)
-    write_risk_state(hmac_key, "NORMAL", f"heartbeat (was stale {age_min} min, scanner alive)")
+    risk_state.write(state_file, hmac_key, "NORMAL",
+                     f"heartbeat (was stale {age_min} min, scanner alive)",
+                     risk_state.SOURCE_RENEW)
     print(f"[heartbeat] WROTE: NORMAL (was stale {age_min} min, scanner alive)")
-    return 0
+    return 0, None, ""
 
 
 if __name__ == "__main__":

@@ -1,447 +1,258 @@
 #!/usr/bin/env python3
 """
-Bybit Earn API client for yield rotation strategy.
-Handles HMAC signing, health checks, data fetching, and position management.
+Bybit Earn API client (FlexibleSaving).
+
+Every failure — HTTP error, timeout, non-JSON body, retCode != 0, or a
+response without the expected list — raises BybitAPIError.  Nothing is
+ever turned into an empty list: "no positions" and "could not read
+positions" must never look the same to the wrapper.
+
+Orders go through ONE endpoint, POST /v5/earn/place-order.  The request is
+built by place_order_request() — the same dict is logged as `would_call`
+in dry-run and sent verbatim in live mode.
+
+BYBIT_TESTNET (1/true/yes) selects https://api-testnet.bybit.com.
 """
+
+from __future__ import annotations
 
 import hashlib
 import hmac
 import json
-import os
+import re
 import sys
 import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
 import urllib.parse
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 import requests
 
-# Manual .env loading
-def load_env(path: str = "/opt/hermes/.env"):
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, val = line.split("=", 1)
-                    os.environ[key.strip()] = val.strip().strip('"').strip("'")
+import settings
 
-load_env()
-# Fallback to local .env
-if not os.getenv("BYBIT_API_KEY"):
-    load_env(".env")
-
-# Configuration
-BASE_URL = "https://api.bybit.com"
+MAINNET_URL = "https://api.bybit.com"
+TESTNET_URL = "https://api-testnet.bybit.com"
 RECV_WINDOW = "5000"
 TIMEOUT = 30
+CATEGORY = "FlexibleSaving"
+PLACE_ORDER_PATH = "/v5/earn/place-order"
+
+
+class BybitAPIError(RuntimeError):
+    """Any failure to get a valid answer from Bybit."""
+
+
+def _truthy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes")
+
+
+def order_link_id(cycle_id: str, order_type: str, product_id: str) -> str:
+    """Deterministic client order id: same cycle + action + product -> same
+    id, so a retried request is deduplicated by Bybit.  ≤ 36 chars of
+    [A-Za-z0-9_-]."""
+    raw = f"{cycle_id}-{order_type[:1].upper()}-{product_id}"
+    clean = re.sub(r"[^A-Za-z0-9_-]", "_", raw)
+    if len(clean) <= 36:
+        return clean
+    return "yr-" + hashlib.sha256(raw.encode()).hexdigest()[:33]
+
+
+def place_order_request(order_type: str, account_type: str, coin: str,
+                        product_id: str, amount: str, order_link_id: str) -> Dict[str, Any]:
+    """The exact request for POST /v5/earn/place-order (FINISH_PLAN, Appendix A)."""
+    if order_type not in ("Stake", "Redeem"):
+        raise ValueError(f"orderType must be Stake or Redeem, got {order_type!r}")
+    return {
+        "method": "POST",
+        "path": PLACE_ORDER_PATH,
+        "body": {
+            "category": CATEGORY,
+            "orderType": order_type,
+            "accountType": account_type,
+            "amount": str(amount),
+            "coin": coin,
+            "productId": str(product_id),
+            "orderLinkId": order_link_id,
+        },
+    }
+
 
 class BybitEarnTool:
-    def __init__(self, api_key: str = None, api_secret: str = None):
-        self.api_key = api_key or os.getenv('BYBIT_API_KEY')
-        self.api_secret = api_secret or os.getenv('BYBIT_API_SECRET')
-        
-        if not self.api_key or not self.api_secret:
-            print("Warning: API credentials not set. Public endpoints will work.")
-        
-        self.session = requests.Session()
-        self.session.headers.update({
-            'Content-Type': 'application/json',
-            'X-BAPI-RECV-WINDOW': RECV_WINDOW
-        })
-    
-    def _generate_signature(self, params: str, timestamp: str) -> str:
-        """Generate HMAC-SHA256 signature for Bybit API."""
-        param_str = f"{timestamp}{self.api_key}{RECV_WINDOW}{params}"
-        return hmac.new(
-            self.api_secret.encode('utf-8'),
-            param_str.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-    
-    def _request(self, method: str, endpoint: str, params: Dict = None, signed: bool = False) -> Dict:
-        """Make HTTP request to Bybit API."""
-        if params is None:
-            params = {}
-        
-        # Prepare URL and query string
-        url = f"{BASE_URL}{endpoint}"
-        query_string = ""
-        
-        if method.upper() == 'GET' and params:
-            query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
-            if query_string:
-                url += f"?{query_string}"
-        
-        # Prepare body for POST/PUT
-        body = ""
-        if method.upper() in ['POST', 'PUT']:
-            body = json.dumps(params)
-        
-        # Add signature if required
-        headers = {}
-        if signed and self.api_key and self.api_secret:
-            timestamp = str(int(time.time() * 1000))
-            param_for_sign = query_string if method.upper() == 'GET' else body
-            signature = self._generate_signature(param_for_sign, timestamp)
-            
-            headers.update({
-                'X-BAPI-API-KEY': self.api_key,
-                'X-BAPI-TIMESTAMP': timestamp,
-                'X-BAPI-SIGN': signature
-            })
-        
-        # Make request
-        try:
-            response = self.session.request(
-                method=method,
-                url=url,
-                headers=headers,
-                data=body if method.upper() in ['POST', 'PUT'] else None,
-                timeout=TIMEOUT
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"API request failed: {e}")
-            if hasattr(e.response, 'text'):
-                print(f"Response: {e.response.text}")
-            raise
-    
-    def health(self) -> Dict:
-        """Check API connectivity and credential validity."""
-        try:
-            # Test public endpoint first
-            server_time = self._request('GET', '/v5/market/time')
-            if server_time.get('retCode') != 0:
-                return {
-                    'status': 'error',
-                    'message': f"Public API failed: {server_time.get('retMsg')}",
-                    'timestamp': datetime.utcnow().isoformat() + 'Z'
-                }
-            
-            # Test signed endpoint if credentials available
-            if self.api_key and self.api_secret:
-                account_info = self._request('GET', '/v5/account/info', signed=True)
-                if account_info.get('retCode') == 0:
-                    return {
-                        'status': 'ok',
-                        'message': 'API connection and credentials valid',
-                        'server_time': server_time.get('result', {}),
-                        'account_type': account_info.get('result', {}).get('accountType'),
-                        'timestamp': datetime.utcnow().isoformat() + 'Z'
-                    }
-                else:
-                    return {
-                        'status': 'error',
-                        'message': f"Signed API failed: {account_info.get('retMsg')}",
-                        'timestamp': datetime.utcnow().isoformat() + 'Z'
-                    }
-            else:
-                return {
-                    'status': 'warning',
-                    'message': 'Public API OK, no credentials provided',
-                    'server_time': server_time.get('result', {}),
-                    'timestamp': datetime.utcnow().isoformat() + 'Z'
-                }
-        except Exception as e:
-            return {
-                'status': 'error',
-                'message': f"Health check failed: {str(e)}",
-                'timestamp': datetime.utcnow().isoformat() + 'Z'
-            }
-    
-    def get_earn_products(self) -> List[Dict]:
-        """Fetch all available Earn products (FlexibleSaving category)."""
-        params = {'category': 'FlexibleSaving'}
-        try:
-            result = self._request('GET', '/v5/earn/product', params=params)
-            if result.get('retCode') == 0:
-                return result.get('result', {}).get('list', [])
-            else:
-                print(f"Failed to fetch earn products: {result.get('retMsg')}")
-                return []
-        except Exception as e:
-            print(f"Error fetching earn products: {e}")
-            return []
-    
-    def get_earn_apr_history(self, coin: str = None, product_id: str = None,
-                            category: str = "FlexibleSaving") -> List[Dict]:
-        """Fetch APR history for Earn products (requires category + productId)."""
-        params = {'category': category}
-        if product_id:
-            params['productId'] = product_id
-        elif coin:
-            # Look up the productId for this coin (first FlexibleSaving product)
-            products = [p for p in self.get_earn_products() if p.get('coin') == coin]
-            if not products:
-                print(f"No FlexibleSaving product found for {coin}")
-                return []
-            params['productId'] = products[0]['productId']
+    def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None,
+                 testnet: Optional[bool] = None, session: Optional[requests.Session] = None):
+        env = settings.load_env()
+        self.api_key = api_key or env.get("BYBIT_API_KEY")
+        self.api_secret = api_secret or env.get("BYBIT_API_SECRET")
+        self.testnet = _truthy(env.get("BYBIT_TESTNET")) if testnet is None else bool(testnet)
+        self.base_url = TESTNET_URL if self.testnet else MAINNET_URL
+        self.session = session if session is not None else requests.Session()
+        self.session.headers.update({"Content-Type": "application/json",
+                                     "X-BAPI-RECV-WINDOW": RECV_WINDOW})
 
+    # ---- transport ---------------------------------------------------------
+
+    def _sign(self, payload: str, timestamp: str) -> str:
+        msg = f"{timestamp}{self.api_key}{RECV_WINDOW}{payload}"
+        return hmac.new(self.api_secret.encode("utf-8"), msg.encode("utf-8"),
+                        hashlib.sha256).hexdigest()
+
+    def _request(self, method: str, endpoint: str, params: Optional[Dict] = None,
+                 signed: bool = False) -> Dict[str, Any]:
+        """Return the `result` object of a successful call; raise otherwise."""
+        method = method.upper()
+        params = params or {}
+        url = f"{self.base_url}{endpoint}"
+        query = urllib.parse.urlencode(sorted(params.items())) if method == "GET" else ""
+        if query:
+            url += f"?{query}"
+        body = json.dumps(params, separators=(",", ":")) if method == "POST" else ""
+
+        headers = {"Content-Type": "application/json", "X-BAPI-RECV-WINDOW": RECV_WINDOW}
+        if signed:
+            if not (self.api_key and self.api_secret):
+                raise BybitAPIError(f"{endpoint}: API credentials not set")
+            ts = str(int(time.time() * 1000))
+            headers.update({"X-BAPI-API-KEY": self.api_key, "X-BAPI-TIMESTAMP": ts,
+                            "X-BAPI-SIGN": self._sign(query if method == "GET" else body, ts)})
         try:
-            result = self._request('GET', '/v5/earn/apr-history', params=params)
-            if result.get('retCode') == 0:
-                return result.get('result', {}).get('list', [])
-            else:
-                print(f"Failed to fetch APR history: {result.get('retMsg')}")
-                return []
-        except Exception as e:
-            print(f"Error fetching APR history: {e}")
-            return []
-    
-    def get_earn_positions(self, coin: str = None) -> List[Dict]:
-        """Fetch current Earn positions."""
-        params = {'category': 'FlexibleSaving'}
+            resp = self.session.request(method=method, url=url, headers=headers,
+                                        data=body or None, timeout=TIMEOUT)
+            resp.raise_for_status()
+            payload = resp.json()
+        except requests.RequestException as e:
+            raise BybitAPIError(f"{endpoint}: HTTP error: {e}") from e
+        except ValueError as e:
+            raise BybitAPIError(f"{endpoint}: response is not JSON") from e
+        if not isinstance(payload, dict):
+            raise BybitAPIError(f"{endpoint}: response is not an object")
+        if payload.get("retCode") != 0:
+            raise BybitAPIError(f"{endpoint}: retCode={payload.get('retCode')} "
+                                f"retMsg={payload.get('retMsg')!r}")
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise BybitAPIError(f"{endpoint}: missing `result` object")
+        return result
+
+    @staticmethod
+    def _list(result: Dict[str, Any], endpoint: str, *keys: str) -> List[Dict]:
+        for key in keys:
+            if isinstance(result.get(key), list):
+                return result[key]
+        raise BybitAPIError(f"{endpoint}: response has no list ({'/'.join(keys)})")
+
+    # ---- reads -------------------------------------------------------------
+
+    def get_earn_products(self, coin: Optional[str] = None) -> List[Dict]:
+        params = {"category": CATEGORY}
         if coin:
-            params['coin'] = coin
+            params["coin"] = coin
+        return self._list(self._request("GET", "/v5/earn/product", params),
+                          "/v5/earn/product", "list")
 
-        try:
-            result = self._request('GET', '/v5/earn/position', params=params, signed=True)
-            if result.get('retCode') == 0:
-                return result.get('result', {}).get('positionList', [])
-            else:
-                print(f"Failed to fetch earn positions: {result.get('retMsg')}")
-                return []
-        except Exception as e:
-            print(f"Error fetching earn positions: {e}")
-            return []
-    
+    def get_earn_apr_history(self, product_id: Optional[str] = None, coin: Optional[str] = None,
+                             category: str = CATEGORY) -> List[Dict]:
+        if not product_id:
+            if not coin:
+                raise ValueError("product_id or coin required")
+            products = [p for p in self.get_earn_products(coin=coin) if p.get("coin") == coin]
+            if not products:
+                raise BybitAPIError(f"no {category} product for {coin}")
+            product_id = products[0]["productId"]
+        result = self._request("GET", "/v5/earn/apr-history",
+                               {"category": category, "productId": product_id})
+        return self._list(result, "/v5/earn/apr-history", "list")
+
+    def get_earn_positions(self, coin: Optional[str] = None) -> List[Dict]:
+        params = {"category": CATEGORY}
+        if coin:
+            params["coin"] = coin
+        result = self._request("GET", "/v5/earn/position", params, signed=True)
+        return self._list(result, "/v5/earn/position", "list", "positionList")
+
     def get_wallet_balance(self, account_type: str = "UNIFIED") -> Dict:
-        """Fetch wallet balance."""
-        params = {'accountType': account_type}
+        result = self._request("GET", "/v5/account/wallet-balance",
+                               {"accountType": account_type}, signed=True)
+        self._list(result, "/v5/account/wallet-balance", "list")
+        return result
+
+    def get_earn_orders(self, order_link_id: Optional[str] = None,
+                        order_id: Optional[str] = None,
+                        product_id: Optional[str] = None) -> List[Dict]:
+        """Recent Earn orders (GET /v5/earn/order)."""
+        params = {"category": CATEGORY}
+        if order_link_id:
+            params["orderLinkId"] = order_link_id
+        if order_id:
+            params["orderId"] = order_id
+        if product_id:
+            params["productId"] = product_id
+        result = self._request("GET", "/v5/earn/order", params, signed=True)
+        return self._list(result, "/v5/earn/order", "list")
+
+    # ---- the only write ----------------------------------------------------
+
+    def place_order(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Send a request built by place_order_request(), verbatim."""
+        if request.get("method") != "POST" or request.get("path") != PLACE_ORDER_PATH:
+            raise ValueError("place_order only sends POST /v5/earn/place-order requests")
+        return self._request("POST", PLACE_ORDER_PATH, request["body"], signed=True)
+
+    # ---- diagnostics -------------------------------------------------------
+
+    def health(self) -> Dict:
+        """Check API connectivity and (if set) credential validity."""
+        now = datetime.now(timezone.utc).isoformat()
         try:
-            result = self._request('GET', '/v5/account/wallet-balance', params=params, signed=True)
-            if result.get('retCode') == 0:
-                return result.get('result', {})
-            else:
-                print(f"Failed to fetch wallet balance: {result.get('retMsg')}")
-                return {}
-        except Exception as e:
-            print(f"Error fetching wallet balance: {e}")
-            return {}
-    
-    def subscribe_earn_product(self, product_id: str, amount: str) -> Dict:
-        """Subscribe to an Earn product."""
-        params = {
-            'productId': product_id,
-            'amount': amount
-        }
-        try:
-            result = self._request('POST', '/v5/earn/subscribe', params=params, signed=True)
-            return result
-        except Exception as e:
-            print(f"Error subscribing to earn product: {e}")
-            raise
-    
-    def redeem_earn_product(self, product_id: str, amount: str) -> Dict:
-        """Redeem from an Earn product."""
-        params = {
-            'productId': product_id,
-            'amount': amount
-        }
-        try:
-            result = self._request('POST', '/v5/earn/redeem', params=params, signed=True)
-            return result
-        except Exception as e:
-            print(f"Error redeeming earn product: {e}")
-            raise
-    
-    def backfill_apr_history(self, days: int = 180, coin: str = None) -> Dict:
-        """Backfill APR history for analysis."""
-        print(f"Backfilling {days} days of APR history for {coin or 'all coins'}...")
-
-        products = self.get_earn_products()
-        if not products:
-            print("No products found")
-            return {}
-
-        history_data = {}
-        target_coins = [coin] if coin else list(set(p.get('coin') for p in products if p.get('coin')))
-
-        for c in target_coins:
-            print(f"Fetching APR history for {c}...")
-            apr_history = self.get_earn_apr_history(coin=c)
-            if apr_history:
-                history_data[c] = apr_history
-                print(f"  OK: {len(apr_history)} records")
-            else:
-                print(f"  No data for {c}")
-
-        return history_data
-
-    def scan_yield_opportunities(self, min_apr_edge: float = 0.009, max_per_product: float = 5.0,
-                                 coin_whitelist: List[str] = None) -> List[Dict]:
-        """Scan for yield opportunities based on strategy parameters.
-        Filters by coin_whitelist to avoid querying APR history for hundreds of products.
-        """
-        if coin_whitelist is None:
-            coin_whitelist = ['USDT']
-
-        print(f"Scanning for yield opportunities (whitelist: {coin_whitelist})...")
-
-        products = self.get_earn_products()
-        if not products:
-            print("No products found")
-            return []
-
-        opportunities = []
-
-        for product in products:
-            coin = product.get('coin')
-            if coin_whitelist and coin not in coin_whitelist:
-                continue
-
-            product_id = product.get('productId')
-            estimate_apr_str = product.get('estimateApr', '0%')
-
-            # Parse APR (remove % and convert to decimal)
-            try:
-                estimate_apr = float(estimate_apr_str.rstrip('%')) / 100
-            except ValueError:
-                estimate_apr = 0.0
-
-            # Get recent APR history for 24h moving average
-            apr_history = self.get_earn_apr_history(coin=coin)
-            apr_ma_24h = None
-
-            if apr_history:
-                # Take last 24 hourly points for 24h moving average
-                recent_aprs = []
-                for item in apr_history[-24:]:
-                    apr_str = item.get('apr', '0')
-                    if apr_str:
-                        try:
-                            # APR may be "0.8%" (with %) or "0.008" (decimal)
-                            if apr_str.endswith('%'):
-                                recent_aprs.append(float(apr_str.rstrip('%')) / 100)
-                            else:
-                                recent_aprs.append(float(apr_str))
-                        except ValueError:
-                            continue
-                if recent_aprs:
-                    apr_ma_24h = sum(recent_aprs) / len(recent_aprs)
-
-            # Apply strategy logic
-            decision = {
-                'product_id': product_id,
-                'coin': coin,
-                'estimate_apr': estimate_apr,
-                'apr_ma_24h': apr_ma_24h,
-                'status': product.get('status'),
-                'min_stake': float(product.get('minStakeAmount', 0) or 0),
-                'max_stake': float(product.get('maxStakeAmount', 0) or 0),
-                'remaining_pool': float(product.get('remainingPoolAmount', 0) or 0),
-                'redeem_processing_minute': product.get('redeemProcessingMinute', 0),
-                'has_tiered_apr': product.get('hasTieredApr', False),
-            }
-
-            # Simple opportunity scoring
-            if apr_ma_24h is not None and estimate_apr > apr_ma_24h + min_apr_edge:
-                decision['signal'] = 'BUY'
-                decision['score'] = estimate_apr - apr_ma_24h
-            elif estimate_apr > 0:  # Positive APR beats idle (0%)
-                decision['signal'] = 'HOLD'
-                decision['score'] = estimate_apr
-            else:
-                decision['signal'] = 'AVOID'
-                decision['score'] = 0
-
-            opportunities.append(decision)
-
-        # Sort by score descending
-        opportunities.sort(key=lambda x: x['score'], reverse=True)
-        return opportunities
+            server_time = self._request("GET", "/v5/market/time")
+            if not (self.api_key and self.api_secret):
+                return {"status": "warning", "message": "Public API OK, no credentials",
+                        "base_url": self.base_url, "server_time": server_time, "timestamp": now}
+            account = self._request("GET", "/v5/account/info", signed=True)
+            return {"status": "ok", "message": "API connection and credentials valid",
+                    "base_url": self.base_url, "account": account, "timestamp": now}
+        except BybitAPIError as e:
+            return {"status": "error", "message": str(e), "base_url": self.base_url,
+                    "timestamp": now}
 
 
 def main():
-    """Command-line interface for the Bybit Earn tool."""
+    """Read-only command-line interface (orders go through run_yield_cycle)."""
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Bybit Earn API client for yield rotation')
-    parser.add_argument('--health', action='store_true', help='Check API health')
-    parser.add_argument('--backfill', type=int, metavar='DAYS', help='Backfill APR history for N days')
-    parser.add_argument('--scan', action='store_true', help='Scan for yield opportunities')
-    parser.add_argument('--products', action='store_true', help='List all Earn products')
-    parser.add_argument('--positions', action='store_true', help='Show current Earn positions')
-    parser.add_argument('--balance', action='store_true', help='Show wallet balance')
-    parser.add_argument('--coin', type=str, help='Filter by coin (e.g., USDT)')
-    parser.add_argument('--product-id', type=str, help='Filter by product ID')
-    parser.add_argument('--amount', type=str, help='Amount for subscribe/redeem operations')
-    parser.add_argument('--subscribe', type=str, metavar='PRODUCT_ID', help='Subscribe to product')
-    parser.add_argument('--redeem', type=str, metavar='PRODUCT_ID', help='Redeem from product')
-    parser.add_argument('--min-apr-edge', type=float, default=0.009, help='Minimum APR edge for signals')
-    parser.add_argument('--max-per-product', type=float, default=5.0, help='Maximum USD per product')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
-    
+
+    parser = argparse.ArgumentParser(description="Bybit Earn API client (read-only)")
+    parser.add_argument("--health", action="store_true", help="Check API health")
+    parser.add_argument("--products", action="store_true", help="List Earn products")
+    parser.add_argument("--positions", action="store_true", help="Show Earn positions")
+    parser.add_argument("--orders", action="store_true", help="Show recent Earn orders")
+    parser.add_argument("--apr-history", action="store_true", help="APR history (--product-id)")
+    parser.add_argument("--balance", action="store_true", help="Show UNIFIED wallet balance")
+    parser.add_argument("--coin", type=str, help="Filter by coin (e.g., USDT)")
+    parser.add_argument("--product-id", type=str, help="Product id")
     args = parser.parse_args()
-    
-    # Initialize tool
+
     tool = BybitEarnTool()
-    
-    # Handle commands
-    if args.health:
-        result = tool.health()
-        print(json.dumps(result, indent=2))
-        return
-    
-    if args.backfill:
-        history = tool.backfill_apr_history(days=args.backfill, coin=args.coin)
-        print(json.dumps(history, indent=2, default=str))
-        return
-    
-    if args.scan:
-        whitelist = [args.coin] if args.coin else ['USDT']
-        opportunities = tool.scan_yield_opportunities(
-            min_apr_edge=args.min_apr_edge,
-            max_per_product=args.max_per_product,
-            coin_whitelist=whitelist
-        )
-        print(json.dumps(opportunities, indent=2))
-        return
-    
-    if args.products:
-        products = tool.get_earn_products()
-        print(json.dumps(products, indent=2))
-        return
-    
-    if args.positions:
-        positions = tool.get_earn_positions(coin=args.coin)
-        print(json.dumps(positions, indent=2))
-        return
-    
-    if args.balance:
-        # Bybit API only supports UNIFIED accountType for /v5/account/wallet-balance
-        # (including Earn products, which draw from the Unified trading account)
-        balance = tool.get_wallet_balance(account_type="UNIFIED")
-        if balance.get('list'):
-            print("=== UNIFIED account (Bybit only supports this type) ===")
-            for coin_data in balance['list'][0].get('coin', []):
-                if coin_data.get('walletBalance', '0') != '0' or coin_data.get('equity', '0') != '0':
-                    print(f"  {coin_data['coin']}: equity={coin_data.get('equity')}, wallet={coin_data.get('walletBalance')}")
+    try:
+        if args.health:
+            out = tool.health()
+        elif args.products:
+            out = tool.get_earn_products(coin=args.coin)
+        elif args.positions:
+            out = tool.get_earn_positions(coin=args.coin)
+        elif args.orders:
+            out = tool.get_earn_orders(product_id=args.product_id)
+        elif args.apr_history:
+            out = tool.get_earn_apr_history(product_id=args.product_id, coin=args.coin)
+        elif args.balance:
+            out = tool.get_wallet_balance("UNIFIED")
         else:
-            print("No balances found")
-        return
-    
-    if args.subscribe:
-        if not args.amount:
-            print("Error: --amount required for subscribe")
-            sys.exit(1)
-        result = tool.subscribe_earn_product(args.subscribe, args.amount)
-        print(json.dumps(result, indent=2))
-        return
-    
-    if args.redeem:
-        if not args.amount:
-            print("Error: --amount required for redeem")
-            sys.exit(1)
-        result = tool.redeem_earn_product(args.redeem, args.amount)
-        print(json.dumps(result, indent=2))
-        return
-    
-    # Default: show help
-    parser.print_help()
+            parser.print_help()
+            return 0
+    except BybitAPIError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(out, indent=2))
+    return 0
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    sys.exit(main())

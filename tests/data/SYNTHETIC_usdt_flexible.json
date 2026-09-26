@@ -1,0 +1,46 @@
+{
+  "_comment": "SYNTHETIC — hand-written in the shape of the Bybit v5 docs, NOT a real capture. Replace with real testnet responses via scripts/capture_bybit_payloads.py (FINISH_PLAN Phase 6, step 4); the tests are then locked on those.",
+  "recorded_at_ms": 1790000000000,
+  "responses": {
+    "/v5/earn/product": {
+      "retCode": 0, "retMsg": "OK",
+      "result": {"list": [
+        {"category": "FlexibleSaving", "estimateApr": "1.2%", "coin": "USDT",
+         "minStakeAmount": "1", "maxStakeAmount": "100000", "precision": "8",
+         "productId": "1", "status": "Available", "redeemProcessingMinute": "0",
+         "hasTieredApr": false, "remainingPoolAmount": "-1"},
+        {"category": "FlexibleSaving", "estimateApr": "0.5%", "coin": "BTC",
+         "minStakeAmount": "0.0001", "maxStakeAmount": "10", "precision": "8",
+         "productId": "2", "status": "Available", "redeemProcessingMinute": "0",
+         "hasTieredApr": false, "remainingPoolAmount": "-1"}
+      ]},
+      "time": 1790000000000
+    },
+    "/v5/earn/apr-history": {
+      "retCode": 0, "retMsg": "OK",
+      "result": {"list": [
+        {"timestamp": "1789999400000", "apr": "1.2%"}, {"timestamp": "1789995800000", "apr": "1.2%"},
+        {"timestamp": "1789992200000", "apr": "1.2%"}, {"timestamp": "1789988600000", "apr": "1.2%"},
+        {"timestamp": "1789985000000", "apr": "1.2%"}, {"timestamp": "1789981400000", "apr": "1.2%"},
+        {"timestamp": "1789977800000", "apr": "1.2%"}, {"timestamp": "1789974200000", "apr": "1.2%"},
+        {"timestamp": "1789970600000", "apr": "1.2%"}, {"timestamp": "1789967000000", "apr": "1.2%"},
+        {"timestamp": "1789963400000", "apr": "1.2%"}, {"timestamp": "1789959800000", "apr": "1.2%"},
+        {"timestamp": "1789956200000", "apr": "1.2%"}, {"timestamp": "1789952600000", "apr": "1.2%"},
+        {"timestamp": "1789949000000", "apr": "1.2%"}, {"timestamp": "1789945400000", "apr": "1.2%"},
+        {"timestamp": "1789941800000", "apr": "1.2%"}, {"timestamp": "1789938200000", "apr": "1.2%"},
+        {"timestamp": "1789934600000", "apr": "1.2%"}, {"timestamp": "1789931000000", "apr": "1.2%"},
+        {"timestamp": "1789927400000", "apr": "1.2%"}, {"timestamp": "1789923800000", "apr": "1.2%"},
+        {"timestamp": "1789920200000", "apr": "1.2%"}, {"timestamp": "1789916600000", "apr": "1.2%"}
+      ]},
+      "time": 1790000000000
+    },
+    "/v5/earn/position": {"retCode": 0, "retMsg": "OK", "result": {"list": []}, "time": 1790000000000},
+    "/v5/earn/order": {"retCode": 0, "retMsg": "OK", "result": {"list": []}, "time": 1790000000000},
+    "/v5/account/wallet-balance": {
+      "retCode": 0, "retMsg": "OK",
+      "result": {"list": [{"accountType": "UNIFIED", "coin": [
+        {"coin": "USDT", "walletBalance": "100", "equity": "100"}]}]},
+      "time": 1790000000000
+    }
+  }
+}
