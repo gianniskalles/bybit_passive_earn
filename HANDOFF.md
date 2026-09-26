@@ -182,6 +182,24 @@ pytest                                   # οπουδήποτε· CI σε κάθ
 `tests/conftest.py`: όλα τα paths σε `tmp_path`, κλειδιά σβησμένα,
 **κάθε σύνδεση δικτύου απαγορεύεται**.
 
+## 8α. Δεύτερη στρατηγική: funding carry (`CARRY_PLAN.md`)
+
+Ουδέτερη θέση (long spot + short perp) πάνω στο ίδιο πλαίσιο ασφαλείας,
+**χωρίς LLM**. Κατάσταση:
+
+- ⛔ **Πύλη 0Α (Giannis): εκκρεμεί.** Πρόσβαση σε USDT perpetuals από
+  λογαριασμό ΕΟΧ μετά το MiCA, Easy Earn/BYUSDT, subaccount. Αν αποτύχει,
+  το σχέδιο σταματά — καμία παράκαμψη.
+- ✅ **Φάση 0Β — κώδικας:** `carry/decide.py` (καθαρή απόφαση της §4, η ίδια
+  που θα καλεί η παραγωγή), `carry/client.py` (μόνο δημόσια endpoints,
+  fail-closed), `carry/backtest.py`, `tools/carry_calibrate.py`.
+- ⏳ **Φάση 0Β — μέτρηση:** θέλει μία εκτέλεση από μέρος με πρόσβαση στη
+  Bybit (το περιβάλλον ανάπτυξης μπλοκάρεται γεωγραφικά από το CloudFront
+  της Bybit). Δημόσια δεδομένα, χωρίς κλειδί:
+  `…/python tools/carry_calibrate.py --out reports/carry` → το
+  `CARRY_CALIBRATION.md` και το `carry_data_<utc>.json` γίνονται commit.
+- **Κανένας κώδικας συναλλαγών** πριν περάσουν και οι δύο πύλες.
+
 ## 9. Ανοιχτά — τι μένει
 
 - **Φάση 6** (`DEPLOY.md`): deploy, νέο HMAC, LLM regression του v6,
