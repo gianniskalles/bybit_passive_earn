@@ -7,12 +7,12 @@
 set -euo pipefail
 
 REPO=/opt/hermes/yield_rotation
-VENV_PY=/opt/hermes/.venv/bin/python
+VENV_PY=/opt/hermes/venvs/yield_rotation/bin/python
 UNIT_DIR=/etc/systemd/system
 TIMERS=(yield-cycle.timer yield-heartbeat.timer yield-summary.timer)
 
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
-[[ -x $VENV_PY ]] || { echo "missing $VENV_PY" >&2; exit 1; }
+[[ -x $VENV_PY ]] || { echo "missing $VENV_PY (the project venv; deploy.sh creates it)" >&2; exit 1; }
 [[ -f $REPO/run_yield_cycle.py ]] || { echo "repo not at $REPO" >&2; exit 1; }
 id hermes >/dev/null 2>&1 || { echo "user hermes does not exist" >&2; exit 1; }
 

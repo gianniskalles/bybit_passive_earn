@@ -12,6 +12,7 @@ import json
 import re
 import os
 import stat
+import sys as _sys
 import subprocess
 import sys
 import time
@@ -213,6 +214,7 @@ def test_telegram_test(isolated_paths, monkeypatch):
 STUB = r'''#!/usr/bin/env bash
 # Logs "<name> <args>" and replies from $STUB_DIR/<name>.<first-arg>.{out,rc}
 name=$(basename "$0")
+printf '%s' "$0" >> "$STUB_DIR/paths.log"; printf ' %q' "$@" >> "$STUB_DIR/paths.log"; printf '\n' >> "$STUB_DIR/paths.log"
 printf '%s' "$name" >> "$STUB_DIR/calls.log"
 printf ' %q' "$@" >> "$STUB_DIR/calls.log"
 printf '\n' >> "$STUB_DIR/calls.log"
@@ -225,6 +227,8 @@ case "$name" in
   systemctl) key="systemctl.$1" ;;
   *) key="$name.${1:-}" ;;
 esac
+# Keys listed in $STUB_PASSTHROUGH run for real (e.g. a real preflight check).
+if [[ " ${STUB_PASSTHROUGH:-} " == *" $key "* ]]; then exec "$REAL_PYTHON" "$@"; fi
 [[ -f "$STUB_DIR/$key.out" ]] && cat "$STUB_DIR/$key.out"
 rcfile="$STUB_DIR/$key.rc"
 rc=0
@@ -246,9 +250,14 @@ def sandbox(tmp_path):
         p.write_text(STUB)
         p.chmod(0o755)
     home = tmp_path / "hermes"
+    # The Hermes CLI venv: only the `hermes` binary. No python here, so any
+    # use of it by deploy.sh would fail loudly.
     (home / ".venv" / "bin").mkdir(parents=True)
-    (home / ".venv" / "bin" / "python").symlink_to(stubs / "python")
     (home / ".venv" / "bin" / "hermes").symlink_to(stubs / "hermes")
+    # The project's own venv.
+    venv = home / "venvs" / "yield_rotation"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(stubs / "python")
     install = tmp_path / "install.sh"
     install.write_text(f'#!/usr/bin/env bash\necho "install.sh $*" >> "{stubs}/calls.log"\n')
     install.chmod(0o755)
@@ -261,7 +270,8 @@ def sandbox(tmp_path):
     (stubs / "python.preflight.regression-report.out").write_text(str(tmp_path / "reg.json") + "\n")
     env = {**{k: v for k, v in os.environ.items() if not k.startswith(("YIELD_", "BYBIT"))},
            "PATH": f"{stubs}:{os.environ['PATH']}", "STUB_DIR": str(stubs),
-           "YIELD_REPO": str(REPO), "YIELD_HERMES_HOME": str(home),
+           "YIELD_REPO": str(REPO), "YIELD_HERMES_HOME": str(home), "YIELD_VENV": str(venv),
+           "REAL_PYTHON": sys.executable,
            "YIELD_RUN_AS": subprocess.run(["id", "-un"], capture_output=True,
                                           text=True).stdout.strip(),
            "YIELD_INSTALL": str(install), "YIELD_DEPLOY_LOG_DIR": str(tmp_path / "logs"),
@@ -270,6 +280,13 @@ def sandbox(tmp_path):
     class Box:
         dir = stubs
         logs = tmp_path / "logs"
+        hermes_home = home
+        project_venv = venv
+        root = tmp_path
+
+        def paths(self):
+            f = stubs / "paths.log"
+            return f.read_text().splitlines() if f.exists() else []
 
         def reply(self, key, out="", rc=0):
             (stubs / f"{key}.out").write_text(out)
@@ -460,3 +477,118 @@ def test_keys_writes_nothing_when_another_key_is_missing(isolated_paths, capsys)
     out = capsys.readouterr().out
     assert settings.load_env_file(prof)["HERMES_RISK_HMAC_KEY"] == SMOKE
     assert "NOT WRITTEN" in out and "GENERATED" not in out
+
+
+
+# =========================================================================== #
+# DRY_RUN is enforced, not just checked                                        #
+# =========================================================================== #
+
+@pytest.mark.parametrize("value,rc", [(True, 0), (False, 1), ("true", 1), (None, 1)])
+def test_preflight_dry_run_on(isolated_paths, value, rc, capsys):
+    import yaml
+    cfg_file = Path(isolated_paths["YIELD_CONFIG_FILE"])
+    cfg = yaml.safe_load(cfg_file.read_text())
+    if value is None:
+        cfg.pop("DRY_RUN")
+    else:
+        cfg["DRY_RUN"] = value
+    cfg_file.write_text(yaml.safe_dump(cfg))
+    assert preflight.main(["dry-run-on"]) == rc
+    assert str(cfg_file) in capsys.readouterr().out
+
+
+def _config_with(tmp_path, **over):
+    import yaml
+    cfg = yaml.safe_load((REPO / "config" / "yield_rotation.yaml").read_text())
+    cfg.update(over)
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    return path
+
+
+def test_live_config_fails_step5_before_anything_runs(sandbox):
+    """Config says DRY_RUN: false -> FAIL at step 5 with zero executions:
+    no risk_state change, no cycle, no heartbeat, no regression, no install."""
+    cfg = _config_with(sandbox.root, DRY_RUN=False, SIMULATED_IDLE_BALANCE=None)
+    sandbox.env_extra = {"YIELD_CONFIG_FILE": str(cfg),
+                         "STUB_PASSTHROUGH": "python.preflight.dry-run-on"}
+    r = sandbox.run()
+    assert "PASS step 4/7" in r.stdout and "FAIL step 5/7" in r.stdout, r.stdout
+    assert "DRY_RUN" in r.stdout
+    calls = sandbox.calls()
+    step5_on = [c for c in calls if c.startswith("python") and any(
+        x in c for x in ("heartbeat", "run_yield_cycle", "reset-state", "check-cycle",
+                         "run_regression"))]
+    assert step5_on == []
+    assert not any("install.sh" in c for c in calls)
+    assert sandbox.systemctl_mutations() == []
+
+
+def test_dry_run_config_passes_the_real_check(sandbox):
+    cfg = _config_with(sandbox.root, DRY_RUN=True)
+    sandbox.env_extra = {"YIELD_CONFIG_FILE": str(cfg),
+                         "STUB_PASSTHROUGH": "python.preflight.dry-run-on"}
+    r = sandbox.run()
+    assert r.returncode == 0, r.stdout
+    assert "DRY_RUN: true (verified" in r.stdout
+
+
+def test_manual_cycle_runs_with_dry_run_flag(sandbox):
+    sandbox.run()
+    cycles = [c for c in sandbox.calls() if "run_yield_cycle" in c]
+    assert cycles and all("--dry-run" in c for c in cycles)
+
+
+def test_dry_run_checked_before_step7_install(sandbox):
+    # step 5 check passes, step 7 check fails -> nothing installed
+    (sandbox.dir / "python.preflight.dry-run-on.rc").write_text("0\n1\n")
+    r = sandbox.run()
+    assert "FAIL step 7/7" in r.stdout
+    assert not any("install.sh" in c for c in sandbox.calls())
+
+
+def test_final_message_only_after_the_final_check(sandbox):
+    # steps 5 and 7 pass, the final re-check fails
+    (sandbox.dir / "python.preflight.dry-run-on.rc").write_text("0\n0\n1\n")
+    r = sandbox.run()
+    assert r.returncode != 0
+    assert "ALL 7 STEPS PASSED" not in r.stdout
+    assert "DRY_RUN: true (verified" not in r.stdout
+
+
+# =========================================================================== #
+# The project has its own venv; the Hermes CLI venv is never modified         #
+# =========================================================================== #
+
+def test_project_uses_its_own_venv(sandbox):
+    assert sandbox.run().returncode == 0
+    hermes_venv = str(sandbox.hermes_home / ".venv")
+    for line in sandbox.paths():
+        exe = line.split()[0]
+        if exe.startswith(hermes_venv):
+            assert exe.endswith("/bin/hermes"), f"hermes venv used for: {line}"
+    pips = [l for l in sandbox.paths() if " -m pip" in l.replace("\\ ", " ")]
+    assert pips and all(l.startswith(str(sandbox.project_venv)) for l in pips)
+    assert any(l.startswith(hermes_venv + "/bin/hermes") for l in sandbox.paths())
+
+
+def test_missing_project_venv_is_created(sandbox):
+    (sandbox.project_venv / "bin" / "python").unlink()
+    base = sandbox.dir / "python3"
+    base.write_text(STUB)
+    base.chmod(0o755)
+    sandbox.env_extra = {"YIELD_BASE_PYTHON": str(base)}
+    r = sandbox.run()
+    assert any(l.startswith(str(base)) and "-m venv" in l and str(sandbox.project_venv) in l
+               for l in sandbox.paths())
+    assert "FAIL step 2/7" in r.stdout  # the stub created nothing
+
+
+def test_nothing_installs_into_the_hermes_cli_venv():
+    for f in ["deploy/deploy.sh", "deploy/install.sh", ".github/workflows/tests.yml",
+              "DEPLOY.md", "HANDOFF.md", "README.md", *map(str, (REPO / "deploy").glob("*.service"))]:
+        text = (REPO / f).read_text()
+        assert "/opt/hermes/.venv/bin/pip" not in text, f
+        assert "/opt/hermes/.venv/bin/python" not in text, f
+        assert "HERMES_HOME/.venv/bin/python" not in text, f

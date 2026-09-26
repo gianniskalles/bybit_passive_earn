@@ -14,7 +14,7 @@ covered by the wrapper unit tests (`pytest`).
 
 Runs only where the agent CLI exists (the VPS):
 
-  /opt/hermes/.venv/bin/python tests/run_regression.py [--runs 5] \
+  /opt/hermes/venvs/yield_rotation/bin/python tests/run_regression.py [--runs 5] \
       [--fixtures 01_stake_when_rate_qualifies,...] [--out results.json]
 
 The run is isolated: its own risk_state file, HMAC key, log dir and

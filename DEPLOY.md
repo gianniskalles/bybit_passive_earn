@@ -42,16 +42,18 @@ sudo cat "$(ls -1t /opt/hermes/logs/deploy/deploy_*.log | head -n 1)"
 | Βήμα | Τι | FAIL όταν |
 |---|---|---|
 | 1 | Βρίσκει units/cron με `yield\|heartbeat\|run_yield_cycle`. Απενεργοποιεί **μόνο** παλιά `yield-*` units· τα units του repo τα κρατά. | Unit που ταιριάζει αλλά **δεν** είναι `yield-*` (δεν το αγγίζει — το απενεργοποιείς με το χέρι αν είναι ο παλιός κύκλος), γραμμή cron που ταιριάζει (δεν αγγίζει crontab), ή αδυναμία ανάγνωσης systemd/crontab |
-| 2 | Commit, καθαρό checkout, `pip install`, **`pytest` ως hermes**, flags του `hermes chat` | Τοπικές αλλαγές, αποτυχημένο test, flag που λείπει |
+| 2 | Commit, καθαρό checkout, **δικό του venv** `/opt/hermes/venvs/yield_rotation` (το φτιάχνει αν λείπει) + `pip install` εκεί, **`pytest` ως hermes**, flags του `hermes chat` (το CLI μένει στο `/opt/hermes/.venv`, ανέγγιχτο) | Τοπικές αλλαγές, venv που δεν δημιουργείται, αποτυχημένο test, flag που λείπει |
 | 3 | Κλειδιά στο `/opt/hermes/.env` — **μόνο fingerprints** (sha256). Νέο HMAC αν λείπει ή είναι το smoke-test· αντιγράφει `BYBIT_*` από το `/opt/data/.env` αν υπάρχουν μόνο εκεί· backup πριν από κάθε αλλαγή· mode 600 | Λείπει κλειδί Bybit ή Telegram, ή `BYBIT_TESTNET` είναι ενεργό (τότε **δεν γράφει τίποτα**) |
 | 4 | Δοκιμαστικό μήνυμα Telegram | Δεν στάλθηκε |
-| 5 | Risk state: κρατά έγκυρο, μετακινεί στην άκρη (`.pre-v6.<utc>`) μη επαληθεύσιμο (π.χ. το παλιό χωρίς `source`) → heartbeat (bootstrap) → **ένας κύκλος DRY_RUN** → heartbeat → `NORMAL` | Εμποδιστικός κωδικός, `data_errors`, `NO_ELIGIBLE_PRODUCTS` (τυπώνει το `filtered_by_wrapper`), κατάσταση operator, όχι `NORMAL` |
+| 5 | **Πρώτα: το config λέει `DRY_RUN: true`** (αλλιώς FAIL πριν τρέξει οτιδήποτε). Risk state: κρατά έγκυρο, μετακινεί στην άκρη (`.pre-v6.<utc>`) μη επαληθεύσιμο (π.χ. το παλιό χωρίς `source`) → heartbeat (bootstrap) → **ένας κύκλος με `--dry-run`** → heartbeat → `NORMAL` | `DRY_RUN` όχι `true`, εμποδιστικός κωδικός, `data_errors`, `NO_ELIGIBLE_PRODUCTS` (τυπώνει το `filtered_by_wrapper`), κατάσταση operator, όχι `NORMAL` |
 | 6 | **LLM regression του prompt v6 με το πραγματικό μοντέλο** (5 σενάρια × 5), πριν από οποιονδήποτε timer | Οτιδήποτε κάτω από 25/25 |
-| 7 | `install.sh` (με `--with-bot` αν υπάρχει `YIELD_TELEGRAM_BOT_TOKEN`), `systemd-analyze verify`, timers `active` | Άκυρο unit, timer όχι active |
+| 7 | **Πρώτα: `DRY_RUN: true` ξανά.** `install.sh` (με `--with-bot` αν υπάρχει `YIELD_TELEGRAM_BOT_TOKEN`), `systemd-analyze verify`, timers `active` | `DRY_RUN` όχι `true` (δεν εγκαθίσταται κανένας timer), άκυρο unit, timer όχι active |
+| τέλος | Τελευταίος έλεγχος `DRY_RUN: true`· **μόνο** μετά τυπώνει `ALL 7 STEPS PASSED … DRY_RUN: true (verified …)` | `DRY_RUN` όχι `true` |
 
 **Δεν κάνει ποτέ:** αλλαγή σε unit που δεν αρχίζει από `yield-` (κάθε
 `systemctl` περνά από έλεγχο που αρνείται), επεξεργασία crontab, τίποτα σε
-testnet, εκτύπωση κλειδιού, αλλαγή του `DRY_RUN`.
+testnet, εκτύπωση κλειδιού, αλλαγή του `DRY_RUN`, εγκατάσταση οτιδήποτε στο
+`/opt/hermes/.venv` (το venv του Hermes CLI).
 
 **Προαιρετικό — εντολές `/unwind`, `/resume`:** χρειάζονται δικό τους bot (ο
 Giannis το φτιάχνει στο @BotFather). Αν δοθεί token, μπαίνει ως
@@ -84,7 +86,7 @@ Giannis το φτιάχνει στο @BotFather). Αν δοθεί token, μπα�
 Telegram στις 06:55 UTC. Στο τέλος:
 
 ```bash
-PY=/opt/hermes/.venv/bin/python REPO=/opt/hermes/yield_rotation
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
 L=/opt/hermes/logs/yield_rotation
 cat $L/*.jsonl | $PY -c '
 import json, sys, collections
@@ -119,7 +121,7 @@ print("dry_run everywhere:", all(r.get("dry_run") is True for r in recs), "| exe
 ## Πώς ελέγχεις ότι όλα τρέχουν
 
 ```bash
-PY=/opt/hermes/.venv/bin/python REPO=/opt/hermes/yield_rotation
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
 systemctl list-timers 'yield-*' --no-pager                  # επόμενη/τελευταία εκτέλεση
 systemctl status yield-cycle.service yield-heartbeat.service --no-pager
 journalctl -u yield-cycle -u yield-heartbeat --since -1h --no-pager | tail -n 40
@@ -141,7 +143,7 @@ Exit codes του κύκλου: `0` ok · `3` config ή prompt · `4` crash (τ�
 αδειάσουν και οι εντολές γίνουν `Success`, σταμάτημα:
 
 ```bash
-PY=/opt/hermes/.venv/bin/python REPO=/opt/hermes/yield_rotation
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
 sudo -u hermes $PY $REPO/risk_state.py write UNWIND "rollback"
 sudo -u hermes $PY $REPO/bybit_earn_tool.py --positions --coin USDT   # μέχρι να αδειάσει
 sudo -u hermes $PY $REPO/bybit_earn_tool.py --orders                  # μέχρι Success

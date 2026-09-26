@@ -4,6 +4,8 @@
 Every subcommand prints what it saw and exits 0 (PASS) or 1 (FAIL).
 Secrets are never printed: only sha256 fingerprints (first 12 hex chars).
 
+  dry-run-on              the config the cycle reads says DRY_RUN: true
+                          (boolean); anything else FAILS
   keys                    HMAC key present and not the smoke-test key (else a
                           new one is generated), Bybit keys in /opt/hermes/.env
                           (copied from /opt/data/.env if only there), Telegram
@@ -140,6 +142,22 @@ def cmd_keys(args: List[str]) -> int:
     return 1 if errors else 0
 
 
+def cmd_dry_run_on(args: List[str]) -> int:
+    path = settings.config_file()
+    try:
+        cfg = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError) as e:
+        print(f"{path}: unreadable: {e}")
+        return 1
+    value = cfg.get("DRY_RUN") if isinstance(cfg, dict) else None
+    print(f"{path}: DRY_RUN = {value!r}")
+    if value is True:
+        return 0
+    print("ERROR: DRY_RUN must be the boolean true. deploy.sh never runs with anything "
+          "else; only Giannis switches to live, outside deploy.")
+    return 1
+
+
 def cmd_telegram_test(args: List[str]) -> int:
     n = Notifier(settings.load_env(), _cfg(), sender=lambda t, c, x: send_telegram(t, c, x))
     print(f"enabled: {n.enabled}  chat: {n.chat}")
@@ -254,6 +272,7 @@ def cmd_has_bot_token(args: List[str]) -> int:
 
 
 COMMANDS = {
+    "dry-run-on": cmd_dry_run_on,
     "keys": cmd_keys,
     "telegram-test": cmd_telegram_test,
     "reset-state-if-invalid": cmd_reset_state_if_invalid,

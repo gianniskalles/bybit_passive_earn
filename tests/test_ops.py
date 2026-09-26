@@ -223,7 +223,7 @@ def test_service_units(unit):
     svc = _ini(unit)["Service"]
     assert svc["User"] == "hermes" and svc["Group"] == "hermes"
     exe, script = svc["ExecStart"].split()
-    assert exe == "/opt/hermes/.venv/bin/python"
+    assert exe == "/opt/hermes/venvs/yield_rotation/bin/python"
     assert script.startswith("/opt/hermes/yield_rotation/")
     assert (REPO / script.removeprefix("/opt/hermes/yield_rotation/")).is_file()
     assert "DRY_RUN" not in unit.read_text()
@@ -282,4 +282,4 @@ def test_deploy_snippets_define_their_variables():
     for block in DEPLOY.split("```bash")[1:]:
         code = block.split("```")[0]
         if "$PY" in code or "$REPO" in code:
-            assert "PY=/opt/hermes/.venv/bin/python" in code, code[:120]
+            assert "PY=/opt/hermes/venvs/yield_rotation/bin/python" in code, code[:120]

@@ -13,5 +13,5 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=yes
-ExecStart=/opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/heartbeat.py
+ExecStart=/opt/hermes/venvs/yield_rotation/bin/python /opt/hermes/yield_rotation/heartbeat.py
 TimeoutStartSec=120

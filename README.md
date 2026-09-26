@@ -43,7 +43,7 @@ config (validated) → risk_state (verified) → Bybit data (each source, fail c
 Run one cycle by hand (on the VPS):
 
 ```bash
-sudo -u hermes /opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/run_yield_cycle.py
+sudo -u hermes /opt/hermes/venvs/yield_rotation/bin/python /opt/hermes/yield_rotation/run_yield_cycle.py
 ```
 
 Exit codes: `0` ok · `3` invalid config or missing prompt · `4` crash. A
@@ -67,8 +67,8 @@ cycles keep running. It never overwrites an operator state or `UNWIND`.
 Operator override (`source: operator`):
 
 ```bash
-sudo -u hermes /opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/risk_state.py write UNWIND "manual stop"
-sudo -u hermes /opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/risk_state.py verify
+sudo -u hermes /opt/hermes/venvs/yield_rotation/bin/python /opt/hermes/yield_rotation/risk_state.py write UNWIND "manual stop"
+sudo -u hermes /opt/hermes/venvs/yield_rotation/bin/python /opt/hermes/yield_rotation/risk_state.py verify
 ```
 
 or on Telegram: `/unwind` / `/resume`, then `/confirm <code>`.

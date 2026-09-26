@@ -24,8 +24,9 @@ jobs:
       - name: pytest
         run: pytest -v
 
-  # Mimics the VPS: repo at /opt/hermes/yield_rotation, venv at
-  # /opt/hermes/.venv, user hermes, pytest run as that user, units verified.
+  # Mimics the VPS: repo at /opt/hermes/yield_rotation, the project's own venv
+  # at /opt/hermes/venvs/yield_rotation (the Hermes CLI's /opt/hermes/.venv is
+  # never touched), user hermes, pytest run as that user, units verified.
   vps-layout:
     runs-on: ubuntu-latest
     steps:
@@ -36,14 +37,15 @@ jobs:
           sudo mkdir -p /opt/hermes
           sudo cp -a "$GITHUB_WORKSPACE" /opt/hermes/yield_rotation
           sudo chown -R hermes:hermes /opt/hermes
-      - name: venv at /opt/hermes/.venv (as hermes)
+      - name: project venv at /opt/hermes/venvs/yield_rotation (as hermes)
         run: |
-          sudo -u hermes python3 -m venv /opt/hermes/.venv
-          sudo -u hermes /opt/hermes/.venv/bin/pip install -q \
+          sudo -u hermes mkdir -p /opt/hermes/venvs
+          sudo -u hermes python3 -m venv /opt/hermes/venvs/yield_rotation
+          sudo -u hermes /opt/hermes/venvs/yield_rotation/bin/pip install -q \
             -r /opt/hermes/yield_rotation/requirements-dev.txt
       - name: pytest as hermes, from /opt/hermes/yield_rotation
         working-directory: /opt/hermes/yield_rotation
-        run: sudo -u hermes env HOME=/opt/hermes /opt/hermes/.venv/bin/python -m pytest -v -p no:cacheprovider
+        run: sudo -u hermes env HOME=/opt/hermes /opt/hermes/venvs/yield_rotation/bin/python -m pytest -v -p no:cacheprovider
       - name: systemd-analyze verify (units as shipped)
         working-directory: /opt/hermes/yield_rotation
         run: sudo systemd-analyze verify deploy/*.service deploy/*.timer

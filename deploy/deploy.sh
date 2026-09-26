@@ -14,12 +14,21 @@
 #
 # Never: touches a systemd unit whose name does not start with "yield-",
 # edits a crontab, runs anything against testnet, prints a secret (keys are
-# shown as sha256 fingerprints), or sets DRY_RUN.
+# shown as sha256 fingerprints), sets DRY_RUN, or installs anything into
+# /opt/hermes/.venv (the Hermes CLI's venv).
+#
+# DRY_RUN is enforced: steps 5 and 7 start by checking that the config says
+# DRY_RUN: true (else FAIL before anything runs), the manual cycle runs with
+# --dry-run, and the final message is printed only after a last check.
 set -uo pipefail
 
 REPO=${YIELD_REPO:-/opt/hermes/yield_rotation}
 HERMES_HOME=${YIELD_HERMES_HOME:-/opt/hermes}
-PY=${YIELD_PY:-$HERMES_HOME/.venv/bin/python}
+# The project's OWN venv. /opt/hermes/.venv belongs to the Hermes CLI and is
+# never modified; only its `hermes` binary is used.
+VENV=${YIELD_VENV:-$HERMES_HOME/venvs/yield_rotation}
+PY=$VENV/bin/python
+BASE_PY=${YIELD_BASE_PYTHON:-python3}
 HERMES_BIN=${YIELD_HERMES_BIN:-$HERMES_HOME/.venv/bin/hermes}
 RUN_AS=${YIELD_RUN_AS:-hermes}
 INSTALL=${YIELD_INSTALL:-$REPO/deploy/install.sh}
@@ -148,6 +157,13 @@ step2_code() {
         echo "local changes in $REPO:"; echo "$dirty"
         return 1
     fi
+    if [[ ! -x $PY ]]; then
+        echo "creating the project venv $VENV (with $BASE_PY)"
+        as_hermes mkdir -p "$(dirname "$VENV")"
+        as_hermes "$BASE_PY" -m venv "$VENV" || true
+    fi
+    [[ -x $PY ]] || { echo "no python at $PY — could not create the project venv"; return 1; }
+    echo "project venv: $VENV ($(as_hermes "$PY" --version 2>&1)); Hermes CLI: $HERMES_BIN"
     as_hermes "$PY" -m pip install -q -r requirements.txt -r requirements-dev.txt
     as_hermes "$PY" -m pytest -q -p no:cacheprovider
     help=$(as_hermes "$HERMES_BIN" chat --help 2>&1) || { echo "$help"; return 1; }
@@ -165,10 +181,11 @@ step3_keys() { preflight keys; }
 step4_telegram() { preflight telegram-test; }
 
 step5_state_and_cycle() {
+    preflight dry-run-on   # before anything else in this step
     preflight reset-state-if-invalid
     as_hermes "$PY" heartbeat.py
     echo "--- manual cycle (DRY_RUN) ---"
-    as_hermes "$PY" run_yield_cycle.py
+    as_hermes "$PY" run_yield_cycle.py --dry-run
     preflight check-cycle
     as_hermes "$PY" heartbeat.py
     preflight expect-normal
@@ -189,6 +206,7 @@ step6_regression() {
 
 step7_systemd() {
     local t
+    preflight dry-run-on   # no timer is installed for a live config
     if preflight has-bot-token; then
         bash "$INSTALL" --with-bot
     else
@@ -214,5 +232,11 @@ run_step 5 "risk_state + one manual DRY_RUN cycle + heartbeat" step5_state_and_c
 run_step 6 "LLM regression of the production prompt (before any timer)" step6_regression
 run_step 7 "systemd units and timers" step7_systemd
 echo
-echo "ALL $TOTAL STEPS PASSED — timers running, DRY_RUN. Next: the 7-day dry-run."
-echo "Testnet is NOT part of this script and waits for Giannis. Log: $LOG"
+echo "===== FINAL CHECK ====="
+if ! preflight dry-run-on; then
+    echo "FAIL final check: the config no longer says DRY_RUN: true"
+    echo "DEPLOY STOPPED at the final check. Paste this log: $LOG"
+    exit 1
+fi
+echo "ALL $TOTAL STEPS PASSED — timers running, DRY_RUN: true (verified by the final check above)."
+echo "Next: the 7-day dry-run. Testnet is NOT part of this script and waits for Giannis. Log: $LOG"

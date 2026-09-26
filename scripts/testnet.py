@@ -12,7 +12,7 @@ BYBIT_TESTNET=1 — it never touches mainnet.
 
 Once saved, tests/test_recorded_payloads.py locks the parsing on them.
 
-  sudo -u hermes env BYBIT_TESTNET=1 /opt/hermes/.venv/bin/python \\
+  sudo -u hermes env BYBIT_TESTNET=1 /opt/hermes/venvs/yield_rotation/bin/python \\
       /opt/hermes/yield_rotation/scripts/testnet.py capture
 """
 

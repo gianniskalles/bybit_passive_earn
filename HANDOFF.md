@@ -28,7 +28,7 @@
 | `telegram_bot.py` | `/status`, `/unwind`, `/resume` με επιβεβαίωση. |
 | `prompt_v6.md` | Το prompt της παραγωγής (`PROMPT_VERSION: v6`). `prompt_v5.md` για σύγκριση· `archive/` τα παλαιότερα. |
 | `config/yield_rotation.yaml` | Όλες οι παράμετροι (§6 κλειδωμένες). Κάθε πεδίο υποχρεωτικό. |
-| `deploy/` | systemd units, `install.sh`, και το **`deploy.sh`** (βήματα 1–7 του `DEPLOY.md` σε μία εντολή, PASS/FAIL ανά βήμα, log) με τους ελέγχους του στο `preflight.py`. |
+| `deploy/` | systemd units (`ExecStart` από το **δικό του venv** `/opt/hermes/venvs/yield_rotation`· το `/opt/hermes/.venv` είναι του Hermes CLI και δεν αγγίζεται), `install.sh`, και το **`deploy.sh`** (βήματα 1–7 του `DEPLOY.md` σε μία εντολή, PASS/FAIL ανά βήμα, log) με τους ελέγχους του στο `preflight.py`. |
 | `scripts/testnet.py` | `capture` / `roundtrip` — μόνο με `BYBIT_TESTNET=1`. |
 | `tests/` | `pytest` (χωρίς δίκτυο, χωρίς `/opt`)· `run_regression.py` (LLM, μόνο VPS). |
 
@@ -130,8 +130,8 @@
 Χειροκίνητα (γράφει `source: operator`):
 
 ```bash
-sudo -u hermes /opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/risk_state.py write UNWIND "λόγος"
-sudo -u hermes /opt/hermes/.venv/bin/python /opt/hermes/yield_rotation/risk_state.py verify
+sudo -u hermes /opt/hermes/venvs/yield_rotation/bin/python /opt/hermes/yield_rotation/risk_state.py write UNWIND "λόγος"
+sudo -u hermes /opt/hermes/venvs/yield_rotation/bin/python /opt/hermes/yield_rotation/risk_state.py verify
 ```
 
 Ή από Telegram (`yield-telegram-bot.service`, δικό του token
@@ -176,7 +176,7 @@ Calibration 180 ημερών, USDT: p25 0,70% · median 1,23% · p75 1,62% · ma
 pip install -r requirements-dev.txt
 pytest                                   # οπουδήποτε· CI σε κάθε push (και job vps-layout:
                                          # repo στο /opt, χρήστης hermes, systemd-analyze verify)
-/opt/hermes/.venv/bin/python tests/run_regression.py --runs 5   # μόνο VPS, πραγματικό μοντέλο
+/opt/hermes/venvs/yield_rotation/bin/python tests/run_regression.py --runs 5   # μόνο VPS, πραγματικό μοντέλο
 ```
 
 `tests/conftest.py`: όλα τα paths σε `tmp_path`, κλειδιά σβησμένα,
