@@ -228,3 +228,31 @@ def test_recommended_params_use_carry_plan_config_names(tmp_path):
     plan_yaml = plan.split("```yaml\n", 1)[1].split("```", 1)[0]
     for k in keys:
         assert f"\n{k}:" in "\n" + plan_yaml, f"{k} is not a CARRY_PLAN §8 config name"
+
+
+def test_report_states_layer_a_coverage(tmp_path):
+    """The real run had ~7 days of Easy Earn APR history for a 180-day
+    period; the rest was the first value carried back. Say so."""
+    data = json.loads(_dataset(tmp_path).read_text())
+    last = data["symbols"]["BTCUSDT"]["funding"][-1][0]
+    data["layer_a"]["points"] = [[last - 7 * DAY + i * H, 0.02] for i in range(7 * 24)]
+    path = tmp_path / "short_a.json"
+    path.write_text(json.dumps(data))
+    out = tmp_path / "r"
+    assert carry_calibrate.main(["--from-data", str(path), "--out", str(out)]) == 0
+    report = json.loads((out / "carry_calibration.json").read_text())
+    cov = report["layer_a_coverage"]
+    assert cov["covered_days"] == pytest.approx(7, abs=0.1)
+    assert cov["extrapolated_days"] == pytest.approx(report["period"]["days"] - 7, abs=0.2)
+    md = (out / "CARRY_CALIBRATION.md").read_text()
+    assert "ιστορικό APR καλύπτει" in md
+
+
+def test_report_yaml_block_parses_to_numbers(tmp_path):
+    import yaml
+    out = tmp_path / "report"
+    carry_calibrate.main(["--from-data", str(_dataset(tmp_path)), "--out", str(out)])
+    md = (out / "CARRY_CALIBRATION.md").read_text()
+    block = yaml.safe_load(md.split("```yaml\n", 1)[1].split("```", 1)[0])
+    for k, v in block.items():
+        assert v is None or isinstance(v, (int, float)), (k, v)

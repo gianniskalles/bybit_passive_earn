@@ -193,12 +193,35 @@ pytest                                   # οπουδήποτε· CI σε κάθ
 - ✅ **Φάση 0Β — κώδικας:** `carry/decide.py` (καθαρή απόφαση της §4, η ίδια
   που θα καλεί η παραγωγή), `carry/client.py` (μόνο δημόσια endpoints,
   fail-closed), `carry/backtest.py`, `tools/carry_calibrate.py`.
-- ⏳ **Φάση 0Β — μέτρηση:** θέλει μία εκτέλεση από μέρος με πρόσβαση στη
-  Bybit (το περιβάλλον ανάπτυξης μπλοκάρεται γεωγραφικά από το CloudFront
-  της Bybit). Δημόσια δεδομένα, χωρίς κλειδί:
-  `…/python tools/carry_calibrate.py --out reports/carry` → το
-  `CARRY_CALIBRATION.md` και το `carry_data_<utc>.json` γίνονται commit.
-- **Κανένας κώδικας συναλλαγών** πριν περάσουν και οι δύο πύλες.
+- ✅ **Φάση 0Β — μέτρηση (VPS, 27/9/2026): NO-GO** — 0/324 συνδυασμοί,
+  καμία είσοδος σε 180 ημέρες (`calibration/CARRY_CALIBRATION.md`). Το
+  ιστορικό APR του layer A καλύπτει μόνο ~7 ημέρες· το report το δηλώνει.
+- **Απόφαση Giannis (CARRY_PLAN §13):** παρά το NO-GO χτίζονται οι Φάσεις
+  1–6· ο κανόνας εισόδου είναι η πύλη. Το carry **αντικαθιστά** το yield
+  rotation (layer A = USDT στο Flexible Easy Earn, το διαχειρίζεται το carry)·
+  στο deploy του carry σβήνουν οι timers του yield rotation — ποτέ δύο
+  συστήματα στον ίδιο λογαριασμό. Είσοδος: redeem → ολοκλήρωση → perp + spot
+  (εγκατάλειψη μετά από `REDEEM_TIMEOUT_HOURS`). Έξοδος: δύο σκέλη → USDT
+  πίσω στο Earn. Μηνιαία επανάληψη της μέτρησης με αναφορά στο Telegram.
+- ✅ **Φάση 1 — config & risk state:**
+  - `carry/config.py`: αυστηρό σχήμα για **κάθε** κλειδί του
+    `config/carry.yaml` (κενό = σφάλμα, ο κύκλος δεν ξεκινά), σχέσεις
+    (hysteresis, MMR_WARN < REDUCE < EMERGENCY, notional ≤ cap) και κατώφλια
+    παραγωγής που μόνο ένα `TESTNET_ONLY: true` config κατεβαίνει — και αυτό
+    απορρίπτεται χωρίς `BYBIT_TESTNET`.
+  - `config/carry.yaml`: οι ⊙ τιμές από το report· **null ως να τα ορίσει ο
+    Giannis:** `MAX_ENTRY_BASIS_BPS`, `MAX_SPREAD_BPS`,
+    `TOTAL_CAPITAL_CAP_USD`, `MAX_NOTIONAL_PER_SYMBOL_USD`,
+    `USDT_BUFFER_USD`, `DEADMAN_URL`.
+  - `config/carry.testnet.yaml`: χαμηλωμένα κατώφλια για τον αναγκαστικό
+    κύκλο του testnet (έξοδος με operator UNWIND).
+  - `carry/state.py`: δικό του υπογεγραμμένο risk state (profile
+    `hermes-carry`, `carry_risk_state.json`), ίδια λογική staleness, πίνακας
+    επιτρεπόμενων ενεργειών (ό,τι μειώνει ρίσκο επιτρέπεται πάντα).
+  - `heartbeat.py --system carry`, `risk_state.py --system carry verify|write`.
+- ⏳ **Φάσεις 2–6:** client/snapshot, πλήρες decide (redeem → αναμονή →
+  σκέλη), execute, risk/ledger/paper με replay συνθετικών ανοδικών
+  καθεστώτων, units `yield-carry-*`. Testnet μόνο με έγκριση του Giannis.
 
 ## 9. Ανοιχτά — τι μένει
 

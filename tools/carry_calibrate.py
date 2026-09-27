@@ -161,8 +161,40 @@ def calibrate(data: Dict) -> Dict:
 # Report                                                                       #
 # --------------------------------------------------------------------------- #
 
+def _yaml_line(key: str, value) -> str:
+    """`KEY: value` that YAML reads back as the same number (PyYAML reads
+    `5e-05` as a string; `5.0e-05` is a float)."""
+    if value is None:
+        return f"{key}: null"
+    if isinstance(value, float):
+        text = repr(value)
+        if "e" in text and "." not in text.split("e")[0]:
+            mantissa, exp = text.split("e")
+            text = f"{mantissa}.0e{exp}"
+        return f"{key}: {text}"
+    return f"{key}: {json.dumps(value)}"
+
+
+def layer_a_coverage(data: Dict, start_ms: int, end_ms: int) -> Dict:
+    pts = data["layer_a"].get("points") or []
+    first = min(p[0] for p in pts) if pts else end_ms
+    days = (end_ms - start_ms) / DAY_MS
+    extrapolated = max(0.0, (min(first, end_ms) - start_ms) / DAY_MS)
+    return {"period_days": round(days, 2), "covered_days": round(days - extrapolated, 2),
+            "extrapolated_days": round(extrapolated, 2)}
+
+
 def _pct(x) -> str:
     return "—" if x is None else f"{x * 100:.2f}%"
+
+
+def _coverage_line(report: Dict) -> str:
+    c = report["layer_a_coverage"]
+    if c["extrapolated_days"] < 0.5:
+        return f"Layer A: το ιστορικό APR καλύπτει όλη την περίοδο ({c['covered_days']:.1f} ημέρες)."
+    return (f"⚠️ Layer A: το ιστορικό APR καλύπτει μόνο {c['covered_days']:.1f} από "
+            f"{c['period_days']:.1f} ημέρες· για τις υπόλοιπες {c['extrapolated_days']:.1f} "
+            f"χρησιμοποιήθηκε η πρώτη διαθέσιμη τιμή (η Bybit δεν δίνει μεγαλύτερο ιστορικό).")
 
 
 def markdown(report: Dict, data: Dict, assumed_a: Optional[float]) -> str:
@@ -174,6 +206,8 @@ def markdown(report: Dict, data: Dict, assumed_a: Optional[float]) -> str:
         f"Πηγή δεδομένων: **{data.get('source')}**, λήψη {when}, "
         f"{report['period']['days']} ημέρες. Layer A: {data['layer_a'].get('source')}"
         + (f" — **ASSUMED {assumed_a:.2%}** (όχι από δεδομένα)" if assumed_a is not None else ""),
+        "",
+        _coverage_line(report),
         "",
         f"## Απόφαση: **{'GO' if v['go'] else 'NO-GO'}**",
         "",
@@ -211,7 +245,7 @@ def markdown(report: Dict, data: Dict, assumed_a: Optional[float]) -> str:
         "## Προτεινόμενες παράμετροι (⊙ της §8)",
         "",
         "```yaml",
-        *[f"{CONFIG_NAMES[k]}: {json.dumps(v)}" for k, v in report["recommended_params"].items()],
+        *[_yaml_line(CONFIG_NAMES[k], v) for k, v in report["recommended_params"].items()],
         "```",
         "",
         "## Τι ΔΕΝ μοντελοποιείται",
@@ -263,6 +297,8 @@ def main(argv=None) -> int:
         data["layer_a"] = {"source": "ASSUMED", "points": [[first, args.assume_layer_a_apr]]}
 
     report = calibrate(data)
+    report["layer_a_coverage"] = layer_a_coverage(data, report["period"]["start_ms"],
+                                                  report["period"]["end_ms"])
     report["assumed_layer_a_apr"] = args.assume_layer_a_apr if data["layer_a"]["source"] == "ASSUMED" else None
     report["data_source"] = data.get("source")
     (args.out / "carry_calibration.json").write_text(json.dumps(report, indent=2))

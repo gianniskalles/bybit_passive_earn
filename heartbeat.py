@@ -47,13 +47,15 @@ Test-only switches (never set in production):
   YIELD_SKIP_CONFIG_DCHECK=1  skip the "LOG_DIR must exist" error
 """
 
+import argparse
 import json
 import os
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import yaml
 
@@ -73,6 +75,43 @@ BLOCKING_CODES = (
     "CYCLE_CRASH",
 )
 
+# The carry cycle's hard-fail codes (CARRY_PLAN §5). While the newest carry
+# record carries one of these, the carry risk state is never renewed or
+# promoted.
+CARRY_BLOCKING_CODES = (
+    "CONFIG_INCOMPLETE",
+    "CRITICAL",
+    "CYCLE_CRASH",
+    "ORPHAN_LEG",
+    "ADL_DETECTED",
+    "LIQUIDATION_DETECTED",
+    "MARGIN_EMERGENCY",
+    "FOREIGN_ACTIVITY",
+    "REGION_RESTRICTED",
+    "EARN_REDEEM_STUCK",
+)
+
+
+@dataclass(frozen=True)
+class System:
+    """One supervised system: its own risk_state file, profile, config and
+    blocking codes. `heartbeat.py --system carry` keeps the carry alive; the
+    default is the yield rotation."""
+    name: str
+    state_file: Callable[[], Path]
+    config_file: Callable[[], Path]
+    profile: str
+    blocking_codes: Tuple[str, ...]
+    interval_key: str
+
+
+SYSTEMS = {
+    "yield": System("yield", settings.risk_state_file, settings.config_file,
+                    risk_state.PROFILE, BLOCKING_CODES, "CYCLE_INTERVAL_MINUTES"),
+    "carry": System("carry", settings.carry_risk_state_file, settings.carry_config_file,
+                    risk_state.CARRY_PROFILE, CARRY_BLOCKING_CODES, "CYCLE_MINUTES"),
+}
+
 
 def load_config(path: Path) -> dict:
     """Load the SAME config/yield_rotation.yaml the wrapper uses."""
@@ -80,7 +119,7 @@ def load_config(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def resolve_log_dir(cfg: dict) -> Path:
+def resolve_log_dir(cfg: dict, config_name: str = "yield_rotation.yaml") -> Path:
     """LOG_DIR from config (wrapper source of truth), with a test-only env
     override. Raises on a non-existent directory unless the test escape
     hatch is set."""
@@ -90,7 +129,7 @@ def resolve_log_dir(cfg: dict) -> Path:
     missing = not chosen.is_dir()
     if missing and os.environ.get("YIELD_SKIP_CONFIG_DCHECK", "") != "1":
         raise FileNotFoundError(
-            f"LOG_DIR from config {settings.config_file().name!r}: {chosen} does not exist. "
+            f"LOG_DIR from config {config_name!r}: {chosen} does not exist. "
             f"This is a MISCONFIG — refusing to treat it as bootstrap."
         )
     return chosen
@@ -106,12 +145,12 @@ def check_bybit_api() -> bool:
         return False
 
 
-def _is_blocking_code(alert: Any) -> Optional[str]:
+def _is_blocking_code(alert: Any, codes: Tuple[str, ...] = BLOCKING_CODES) -> Optional[str]:
     """Return the blocking code if this alert is a hard-fail, else None."""
     if not isinstance(alert, str):
         return None
     a = alert.strip()
-    for code in BLOCKING_CODES:
+    for code in codes:
         if a == code or a.startswith(code + ":"):
             return code
     return None
@@ -130,7 +169,8 @@ def last_cycle_record(log_dir: Path) -> Optional[Dict[str, Any]]:
     return rec if isinstance(rec, dict) else None
 
 
-def check_last_cycle_ok(log_dir: Path) -> Tuple[bool, Optional[str]]:
+def check_last_cycle_ok(log_dir: Path,
+                        codes: Tuple[str, ...] = BLOCKING_CODES) -> Tuple[bool, Optional[str]]:
     """(ok, blocking_code). No readable cycle -> ok (nothing to block on)."""
     rec = last_cycle_record(log_dir)
     if rec is None:
@@ -141,7 +181,7 @@ def check_last_cycle_ok(log_dir: Path) -> Tuple[bool, Optional[str]]:
     if not isinstance(alerts, list):
         return True, None
     for alert in alerts:
-        code = _is_blocking_code(alert)
+        code = _is_blocking_code(alert, codes)
         if code is not None:
             return False, code
     return True, None
@@ -175,11 +215,12 @@ def scanner_alive(log_dir: Path, alive_window_ms: int) -> bool:
     return age is not None and 0 <= age < alive_window_ms
 
 
-def clean_cycle_verified(log_dir: Path, state_ts: int) -> bool:
+def clean_cycle_verified(log_dir: Path, state_ts: int,
+                         codes: Tuple[str, ...] = BLOCKING_CODES) -> bool:
     """True iff the newest cycle is non-blocking, verified exactly this
     risk_state record, and ran after it."""
     rec = last_cycle_record(log_dir)
-    if rec is None or not check_last_cycle_ok(log_dir)[0]:
+    if rec is None or not check_last_cycle_ok(log_dir, codes)[0]:
         return False
     meta = rec.get("risk_state_meta")
     if not isinstance(meta, dict):
@@ -196,26 +237,35 @@ def send_telegram_alert(bot_token: str, chat_id: str, text: str) -> bool:
     return notify.send_telegram(bot_token, chat_id, text)
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="risk_state heartbeat")
+    ap.add_argument("--system", choices=sorted(SYSTEMS), default="yield")
+    args = ap.parse_args([] if argv is None else argv)
+    system = SYSTEMS[args.system]
     env = settings.load_env()
     cfg: Dict[str, Any] = {}
     try:
-        cfg = load_config(settings.config_file())
+        cfg = load_config(system.config_file())
     except Exception:
         pass  # reported by _decide
-    rc, condition, text = _decide(env)
+    rc, condition, text = _decide(env, system)
+    if condition and system.name != "yield":
+        text = f"[{system.name}] {text}"
     notifier = Notifier(env, cfg if isinstance(cfg, dict) else {},
                         sender=lambda t, c, x: send_telegram_alert(t, c, x))
-    notifier.observe("heartbeat", condition, text,
-                     resolved_text=None if condition else "✅ HEARTBEAT: back to normal")
+    channel = "heartbeat" if system.name == "yield" else f"heartbeat:{system.name}"
+    notifier.observe(channel, condition, text,
+                     resolved_text=None if condition else
+                     f"✅ HEARTBEAT{'' if system.name == 'yield' else f' [{system.name}]'}: back to normal")
     return rc
 
 
-def _decide(env: Dict[str, str]) -> Tuple[int, Optional[str], str]:
+def _decide(env: Dict[str, str], system: System = SYSTEMS["yield"]) -> Tuple[int, Optional[str], str]:
     """One heartbeat decision. Returns (exit_code, alert_condition, text);
     alert_condition is None when everything is healthy."""
-    state_file = settings.risk_state_file()
-    config_file = settings.config_file()
+    state_file = system.state_file()
+    config_file = system.config_file()
+    codes, profile = system.blocking_codes, system.profile
 
     hmac_key = env.get("HERMES_RISK_HMAC_KEY")
     if not hmac_key:
@@ -224,7 +274,7 @@ def _decide(env: Dict[str, str]) -> Tuple[int, Optional[str], str]:
 
     try:
         cfg = load_config(config_file)
-        log_dir = resolve_log_dir(cfg)
+        log_dir = resolve_log_dir(cfg, config_file.name)
     except FileNotFoundError as e:
         print(f"[heartbeat] ERROR: {e}", file=sys.stderr)
         return 3, "log_dir_missing", f"🚨 HEARTBEAT ERROR: {e}"
@@ -236,25 +286,25 @@ def _decide(env: Dict[str, str]) -> Tuple[int, Optional[str], str]:
         print("[heartbeat] ABSTAIN: Bybit API unreachable")
         return 0, "bybit_unreachable", "⚠️ HEARTBEAT ABSTAIN: Bybit API unreachable."
 
-    cycle_ok, block_code = check_last_cycle_ok(log_dir)
+    cycle_ok, block_code = check_last_cycle_ok(log_dir, codes)
     if not cycle_ok:
         print(f"[heartbeat] ABSTAIN: last cycle blocked by {block_code}")
         return 0, f"cycle_blocked:{block_code}", (
             f"⚠️ HEARTBEAT ABSTAIN: last cycle hard-failed ({block_code}). Risk state NOT renewed.")
 
-    interval_min = cfg.get("CYCLE_INTERVAL_MINUTES", 10)
+    interval_min = cfg.get(system.interval_key, 10)
     if not isinstance(interval_min, (int, float)) or interval_min <= 0:
         interval_min = 10
     scanner_window_ms = max(MAX_AGE_MS, int(3 * interval_min * 60 * 1000))
 
-    v = risk_state.verify(state_file, hmac_key)
+    v = risk_state.verify(state_file, hmac_key, profile=profile)
 
     if v.code == risk_state.CODE_MISSING:
         # Fail-closed bootstrap: promoted to NORMAL only after a verified
         # clean cycle has seen this exact record.
         risk_state.write(state_file, hmac_key, "NO_NEW_POSITIONS",
                          "heartbeat bootstrap: no verified supervision cycle yet",
-                         risk_state.SOURCE_BOOTSTRAP)
+                         risk_state.SOURCE_BOOTSTRAP, profile=profile)
         print("[heartbeat] WROTE: NO_NEW_POSITIONS (bootstrap)")
         return 0, None, ""
 
@@ -267,10 +317,10 @@ def _decide(env: Dict[str, str]) -> Tuple[int, Optional[str], str]:
 
     if (v.state == "NO_NEW_POSITIONS" and v.source == risk_state.SOURCE_BOOTSTRAP
             and scanner_alive(log_dir, scanner_window_ms)
-            and clean_cycle_verified(log_dir, v.ts)):
+            and clean_cycle_verified(log_dir, v.ts, codes)):
         risk_state.write(state_file, hmac_key, "NORMAL",
                          "heartbeat: bootstrap promoted after verified clean cycle",
-                         risk_state.SOURCE_RENEW)
+                         risk_state.SOURCE_RENEW, profile=profile)
         print("[heartbeat] WROTE: NORMAL (bootstrap promoted after verified clean cycle)")
         return 0, None, ""
 
@@ -295,10 +345,10 @@ def _decide(env: Dict[str, str]) -> Tuple[int, Optional[str], str]:
 
     risk_state.write(state_file, hmac_key, "NORMAL",
                      f"heartbeat (was stale {age_min} min, scanner alive)",
-                     risk_state.SOURCE_RENEW)
+                     risk_state.SOURCE_RENEW, profile=profile)
     print(f"[heartbeat] WROTE: NORMAL (was stale {age_min} min, scanner alive)")
     return 0, None, ""
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

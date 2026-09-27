@@ -21,7 +21,8 @@ Rules, in order:
   5. Entry (NORMAL only):
        predicted >= ENTRY_MIN_PREDICTED_RATE
        smoothed * periods_per_year - layer_A_apr >= ENTRY_MIN_EXPECTED_APR
-       (smoothed - layer_A per period) * periods in MIN_HOLD >= round trip cost
+       (smoothed - layer_A per period) * periods in MIN_HOLD
+           >= ENTRY_EV_MULTIPLE * round trip cost
        |basis| <= MAX_ENTRY_BASIS_BPS, spread <= MAX_SPREAD_BPS (when set)
        round trips in the last 30 days < MAX_ROUND_TRIPS_PER_30D
   6. Funding exit (after MIN_HOLD, outside the window) only if
@@ -54,6 +55,10 @@ class Params:
     max_spread_bps: Optional[float]
     spot_taker_fee: float
     perp_taker_fee: float
+    # Income over MIN_HOLD must be >= this many round trips. Production
+    # configs require >= 1 (carry/config.py); only a TESTNET_ONLY config may
+    # lower it, to force a full cycle on testnet.
+    entry_ev_multiple: float = 1.0
 
     def __post_init__(self):
         if self.entry_min_predicted_rate <= self.exit_predicted_floor:
@@ -63,7 +68,7 @@ class Params:
         if not isinstance(self.max_round_trips_30d, int) or self.max_round_trips_30d < 0:
             raise ValueError("MAX_ROUND_TRIPS_PER_30D must be an integer >= 0")
         for name in ("exit_horizon_hours", "min_hold_hours", "no_funding_action_before_settlement_min",
-                     "spot_taker_fee", "perp_taker_fee"):
+                     "spot_taker_fee", "perp_taker_fee", "entry_ev_multiple"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0")
 
@@ -195,9 +200,10 @@ def _entry_rule(view, pos, p, smoothed, ppy, expected_apr, out) -> Decision:
                                      f"< ENTRY_MIN_EXPECTED_APR {p.entry_min_expected_apr}")
     hold_periods = p.min_hold_hours * 60 / interval
     net_per_period = smoothed - view.layer_a_apr / ppy
-    if net_per_period * hold_periods < p.round_trip_cost:
+    if net_per_period * hold_periods < p.entry_ev_multiple * p.round_trip_cost:
         return out("STAY_OUT", None, f"MIN_HOLD income {net_per_period * hold_periods:.5f} "
-                                     f"does not pay back the round trip {p.round_trip_cost:.5f}")
+                                     f"does not pay back {p.entry_ev_multiple} round trip(s) "
+                                     f"of {p.round_trip_cost:.5f}")
     if p.max_entry_basis_bps is not None:
         if view.basis_bps is None or abs(view.basis_bps) > p.max_entry_basis_bps:
             return out("STAY_OUT", None, f"basis {view.basis_bps} bps outside "

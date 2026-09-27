@@ -2,6 +2,8 @@
 
 Πηγή δεδομένων: **bybit https://api.bybit.com**, λήψη 2026-09-27 09:03 UTC, 179.7 ημέρες. Layer A: USDT FlexibleSaving productId 1
 
+⚠️ Layer A: το ιστορικό APR καλύπτει μόνο 6.9 από 179.7 ημέρες· για τις υπόλοιπες 172.8 χρησιμοποιήθηκε η πρώτη διαθέσιμη τιμή (η Bybit δεν δίνει μεγαλύτερο ιστορικό).
+
 ## Απόφαση: **NO-GO**
 
 | Κριτήριο (§2) | Τιμή | Όριο | |
@@ -26,7 +28,7 @@ Out-of-sample (δεύτερο μισό, παράμετροι επιλεγμέν�
 
 ```yaml
 ENTRY_MIN_EXPECTED_APR: 0.03
-ENTRY_MIN_PREDICTED_RATE: 5e-05
+ENTRY_MIN_PREDICTED_RATE: 5.0e-05
 EXIT_PREDICTED_FLOOR: -0.0001
 EXIT_HORIZON_HOURS: 72
 SMOOTHING_SETTLEMENTS: 3
