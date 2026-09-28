@@ -1,0 +1,82 @@
+{
+  "_comment": "SYNTHETIC — hand-written in the shape of the Bybit v5 docs, NOT a real capture. Real responses come from `scripts/testnet.py carry-capture` (testnet, only with Giannis's approval) into tests/data/carry/; tests/test_carry_phase2.py runs every capture here through the same checks. Keys are response_key(): path + sorted stable query.",
+  "recorded_at_ms": 1790000000000,
+  "responses": {
+    "/v5/market/instruments-info?category=linear&symbol=BTCUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "nextPageCursor": "", "list": [
+      {"symbol": "BTCUSDT", "contractType": "LinearPerpetual", "status": "Trading", "baseCoin": "BTC", "quoteCoin": "USDT", "settleCoin": "USDT", "fundingInterval": 480,
+       "priceFilter": {"minPrice": "0.10", "maxPrice": "1999999.80", "tickSize": "0.10"},
+       "lotSizeFilter": {"maxOrderQty": "1190.000", "minOrderQty": "0.001", "qtyStep": "0.001", "minNotionalValue": "5"}}]}, "time": 1790000000000},
+    "/v5/market/instruments-info?category=linear&symbol=ETHUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "nextPageCursor": "", "list": [
+      {"symbol": "ETHUSDT", "contractType": "LinearPerpetual", "status": "Trading", "baseCoin": "ETH", "quoteCoin": "USDT", "settleCoin": "USDT", "fundingInterval": 480,
+       "priceFilter": {"minPrice": "0.01", "maxPrice": "199999.98", "tickSize": "0.01"},
+       "lotSizeFilter": {"maxOrderQty": "7240.00", "minOrderQty": "0.01", "qtyStep": "0.01", "minNotionalValue": "5"}}]}, "time": 1790000000000},
+    "/v5/market/instruments-info?category=spot&symbol=BTCUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "spot", "list": [
+      {"symbol": "BTCUSDT", "baseCoin": "BTC", "quoteCoin": "USDT", "status": "Trading",
+       "lotSizeFilter": {"basePrecision": "0.000001", "quotePrecision": "0.00000001", "minOrderQty": "0.000048", "maxOrderQty": "71.73956243", "minOrderAmt": "1", "maxOrderAmt": "2000000"},
+       "priceFilter": {"tickSize": "0.01"}}]}, "time": 1790000000000},
+    "/v5/market/instruments-info?category=spot&symbol=ETHUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "spot", "list": [
+      {"symbol": "ETHUSDT", "baseCoin": "ETH", "quoteCoin": "USDT", "status": "Trading",
+       "lotSizeFilter": {"basePrecision": "0.00001", "quotePrecision": "0.0000001", "minOrderQty": "0.00062", "maxOrderQty": "1229.2336343", "minOrderAmt": "1", "maxOrderAmt": "2000000"},
+       "priceFilter": {"tickSize": "0.01"}}]}, "time": 1790000000000},
+    "/v5/market/tickers?category=linear&symbol=BTCUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "list": [
+      {"symbol": "BTCUSDT", "lastPrice": "65010.10", "indexPrice": "65000.00", "markPrice": "65005.00", "bid1Price": "65010.00", "bid1Size": "3.2", "ask1Price": "65010.10", "ask1Size": "1.1",
+       "fundingRate": "0.0001", "nextFundingTime": "1790006400000", "openInterest": "50000"}]}, "time": 1790000000000},
+    "/v5/market/tickers?category=linear&symbol=ETHUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "list": [
+      {"symbol": "ETHUSDT", "lastPrice": "2500.51", "indexPrice": "2500.00", "markPrice": "2500.30", "bid1Price": "2500.50", "bid1Size": "40", "ask1Price": "2500.51", "ask1Size": "12",
+       "fundingRate": "0.00008", "nextFundingTime": "1790006400000", "openInterest": "900000"}]}, "time": 1790000000000},
+    "/v5/market/tickers?category=spot&symbol=BTCUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "spot", "list": [
+      {"symbol": "BTCUSDT", "lastPrice": "64995.00", "bid1Price": "64995.00", "bid1Size": "0.5", "ask1Price": "64995.01", "ask1Size": "0.7"}]}, "time": 1790000000000},
+    "/v5/market/tickers?category=spot&symbol=ETHUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "spot", "list": [
+      {"symbol": "ETHUSDT", "lastPrice": "2499.80", "bid1Price": "2499.80", "bid1Size": "10", "ask1Price": "2499.81", "ask1Size": "8"}]}, "time": 1790000000000},
+    "/v5/market/funding/history?category=linear&symbol=BTCUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "list": [
+      {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789977600000"},
+      {"symbol": "BTCUSDT", "fundingRate": "0.00009", "fundingRateTimestamp": "1789948800000"},
+      {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789920000000"},
+      {"symbol": "BTCUSDT", "fundingRate": "0.00011", "fundingRateTimestamp": "1789891200000"},
+      {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789862400000"},
+      {"symbol": "BTCUSDT", "fundingRate": "0.00008", "fundingRateTimestamp": "1789833600000"},
+      {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789804800000"},
+      {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789776000000"},
+      {"symbol": "BTCUSDT", "fundingRate": "-0.00002", "fundingRateTimestamp": "1789747200000"},
+      {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789718400000"},
+      {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789689600000"}]}, "time": 1790000000000},
+    "/v5/market/funding/history?category=linear&symbol=ETHUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "list": [
+      {"symbol": "ETHUSDT", "fundingRate": "0.00008", "fundingRateTimestamp": "1789977600000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789948800000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789920000000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.00006", "fundingRateTimestamp": "1789891200000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789862400000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789833600000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.00012", "fundingRateTimestamp": "1789804800000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789776000000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789747200000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.00005", "fundingRateTimestamp": "1789718400000"},
+      {"symbol": "ETHUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1789689600000"}]}, "time": 1790000000000},
+    "/v5/position/list?category=linear&symbol=BTCUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "nextPageCursor": "", "list": [
+      {"positionIdx": 0, "symbol": "BTCUSDT", "side": "", "size": "0", "avgPrice": "0", "positionValue": "", "liqPrice": "", "markPrice": "65005.00", "adlRankIndicator": 0, "tradeMode": 0, "positionStatus": "Normal"}]}, "time": 1790000000000},
+    "/v5/position/list?category=linear&symbol=ETHUSDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "nextPageCursor": "", "list": [
+      {"positionIdx": 0, "symbol": "ETHUSDT", "side": "Sell", "size": "0.40", "avgPrice": "2480.00", "positionValue": "992", "liqPrice": "4900.00", "markPrice": "2500.30", "adlRankIndicator": 2, "tradeMode": 0, "positionStatus": "Normal"}]}, "time": 1790000000000},
+    "/v5/account/info": {"retCode": 0, "retMsg": "OK", "result": {"marginMode": "REGULAR_MARGIN", "unifiedMarginStatus": 5, "updatedTime": "1789000000000"}, "time": 1790000000000},
+    "/v5/account/wallet-balance?accountType=UNIFIED": {"retCode": 0, "retMsg": "OK", "result": {"list": [
+      {"accountType": "UNIFIED", "accountIMRate": "0.08", "accountMMRate": "0.02", "totalEquity": "2100", "coin": [
+        {"coin": "USDT", "walletBalance": "1100", "equity": "1090", "borrowAmount": "0", "marginCollateral": true, "collateralSwitch": true},
+        {"coin": "ETH", "walletBalance": "0.4", "equity": "0.4", "borrowAmount": "0", "marginCollateral": true, "collateralSwitch": true}]}]}, "time": 1790000000000},
+    "/v5/account/fee-rate?category=linear&symbol=BTCUSDT": {"retCode": 0, "retMsg": "OK", "result": {"list": [{"symbol": "BTCUSDT", "takerFeeRate": "0.00055", "makerFeeRate": "0.0002"}]}, "time": 1790000000000},
+    "/v5/account/fee-rate?category=linear&symbol=ETHUSDT": {"retCode": 0, "retMsg": "OK", "result": {"list": [{"symbol": "ETHUSDT", "takerFeeRate": "0.00055", "makerFeeRate": "0.0002"}]}, "time": 1790000000000},
+    "/v5/account/fee-rate?category=spot&symbol=BTCUSDT": {"retCode": 0, "retMsg": "OK", "result": {"list": [{"symbol": "BTCUSDT", "takerFeeRate": "0.001", "makerFeeRate": "0.001"}]}, "time": 1790000000000},
+    "/v5/account/fee-rate?category=spot&symbol=ETHUSDT": {"retCode": 0, "retMsg": "OK", "result": {"list": [{"symbol": "ETHUSDT", "takerFeeRate": "0.001", "makerFeeRate": "0.001"}]}, "time": 1790000000000},
+    "/v5/account/collateral-info?currency=BTC": {"retCode": 0, "retMsg": "OK", "result": {"list": [
+      {"currency": "BTC", "hourlyBorrowRate": "0.0000001", "borrowAmount": "0", "borrowable": true, "collateralRatio": "0.95", "marginCollateral": true, "collateralSwitch": true}]}, "time": 1790000000000},
+    "/v5/account/collateral-info?currency=ETH": {"retCode": 0, "retMsg": "OK", "result": {"list": [
+      {"currency": "ETH", "hourlyBorrowRate": "0.0000001", "borrowAmount": "0", "borrowable": true, "collateralRatio": "0.95", "marginCollateral": true, "collateralSwitch": true}]}, "time": 1790000000000},
+    "/v5/order/realtime?category=linear&settleCoin=USDT": {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "nextPageCursor": "", "list": []}, "time": 1790000000000},
+    "/v5/order/realtime?category=spot": {"retCode": 0, "retMsg": "OK", "result": {"category": "spot", "nextPageCursor": "", "list": []}, "time": 1790000000000},
+    "/v5/earn/product?category=FlexibleSaving&coin=USDT": {"retCode": 0, "retMsg": "OK", "result": {"list": [
+      {"category": "FlexibleSaving", "estimateApr": "1.73%", "coin": "USDT", "minStakeAmount": "1", "maxStakeAmount": "100000", "precision": "8",
+       "productId": "1", "status": "Available", "redeemProcessingMinute": "0", "hasTieredApr": false, "remainingPoolAmount": "-1"}]}, "time": 1790000000000},
+    "/v5/earn/position?category=FlexibleSaving&coin=USDT": {"retCode": 0, "retMsg": "OK", "result": {"list": [
+      {"coin": "USDT", "productId": "1", "amount": "900", "totalPnl": "1.2", "claimableYield": "0.01", "status": "Active"}]}, "time": 1790000000000},
+    "/v5/earn/order?category=FlexibleSaving": {"retCode": 0, "retMsg": "OK", "result": {"list": [
+      {"coin": "USDT", "orderValue": "1000", "orderType": "Redeem", "orderId": "e1", "orderLinkId": "cy-redeem-1", "status": "Success", "createdAt": "1789900000000", "productId": "1", "updatedAt": "1789900060000"}]}, "time": 1790000000000}
+  }
+}

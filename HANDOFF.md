@@ -209,19 +209,45 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     (hysteresis, MMR_WARN < REDUCE < EMERGENCY, notional ≤ cap) και κατώφλια
     παραγωγής που μόνο ένα `TESTNET_ONLY: true` config κατεβαίνει — και αυτό
     απορρίπτεται χωρίς `BYBIT_TESTNET`.
-  - `config/carry.yaml`: οι ⊙ τιμές από το report· **null ως να τα ορίσει ο
-    Giannis:** `MAX_ENTRY_BASIS_BPS`, `MAX_SPREAD_BPS`,
-    `TOTAL_CAPITAL_CAP_USD`, `MAX_NOTIONAL_PER_SYMBOL_USD`,
-    `USDT_BUFFER_USD`, `DEADMAN_URL`.
+  - `config/carry.yaml`: κατώφλια της απόφασης §13.8 (MIN_HOLD 336 h,
+    smoothing 9, horizon 168 h, 5% APR). 0,01%/8h μπαίνει· στα πραγματικά
+    180 ημέρες γίνεται **μία** είσοδος ανά σύμβολο (τέλη Αυγούστου) — η §13.8
+    περίμενε καμία· εκκρεμεί απόφαση Giannis. **Null:** `TOTAL_CAPITAL_CAP_USD` = X (Giannis), από αυτό
+    `USDT_BUFFER_USD` = 10% X και `MAX_NOTIONAL_PER_SYMBOL_USD` = (X − buffer)/2
+    (§13.9, επιβάλλεται)· `MAX_ENTRY_BASIS_BPS`, `MAX_SPREAD_BPS` από ζωντανά
+    δεδομένα (Φάση 2)· `DEADMAN_URL` πριν το live.
   - `config/carry.testnet.yaml`: χαμηλωμένα κατώφλια για τον αναγκαστικό
     κύκλο του testnet (έξοδος με operator UNWIND).
   - `carry/state.py`: δικό του υπογεγραμμένο risk state (profile
     `hermes-carry`, `carry_risk_state.json`), ίδια λογική staleness, πίνακας
     επιτρεπόμενων ενεργειών (ό,τι μειώνει ρίσκο επιτρέπεται πάντα).
   - `heartbeat.py --system carry`, `risk_state.py --system carry verify|write`.
-- ⏳ **Φάσεις 2–6:** client/snapshot, πλήρες decide (redeem → αναμονή →
-  σκέλη), execute, risk/ledger/paper με replay συνθετικών ανοδικών
-  καθεστώτων, units `yield-carry-*`. Testnet μόνο με έγκριση του Giannis.
+- ✅ **Φάση 2 — client & snapshot:**
+  - `carry/client.py`: `CarryClient` — tickers, orderbook, πρόσφατο funding,
+    θέσεις, account info, wallet, fee-rate, collateral-info, ανοιχτές εντολές,
+    `find_order` (R23: αναζήτηση με `orderLinkId` πριν από επανάληψη),
+    executions, transaction log. Σελιδοποίηση που δεν τελειώνει = σφάλμα.
+    `is_region_restricted` (R1): retCode 10024 ή «from your country» —
+    **ανεπιβεβαίωτο**, μόνο συντηρητικό.
+  - `carry/snapshot.py`: ένα αμετάβλητο στιγμιότυπο ανά κύκλο· κάθε ενότητα
+    (`market:<SYM>`, `positions:<SYM>`, `account`, `orders`, `earn`)
+    διαβάζεται ολόκληρη ή λείπει με τον λόγο· κανένα default. Φρεσκάδα (R27),
+    ξένες εντολές (R2), κατάσταση εντολών Earn (μόνο `Success` = ολοκληρωμένο
+    redeem, απόφαση 13.4).
+  - Tests κλειδωμένα στα captures του `tests/data/carry/` (σήμερα μόνο
+    `SYNTHETIC_snapshot.json`). Πραγματικά: `scripts/testnet.py
+    carry-capture` — **μόνο με έγκριση Giannis**.
+  - `tools/carry_market_sample.py`: `MAX_ENTRY_BASIS_BPS` = ceil(p95 |basis|),
+    `MAX_SPREAD_BPS` = ceil(p99 spread), από ζωντανά δημόσια δεδομένα. Το
+    περιβάλλον ανάπτυξης μπλοκάρεται γεωγραφικά· τρέχει στο VPS (24 ώρες):
+    `sudo -u hermes nohup /opt/hermes/venvs/yield_rotation/bin/python
+    /opt/hermes/yield_rotation/tools/carry_market_sample.py --minutes 1440
+    --out /opt/hermes/yield_rotation/calibration &` → commit του
+    `CARRY_MARKET_SAMPLE.md` και του `carry_market_<utc>.json`, και οι δύο
+    τιμές μπαίνουν στο `config/carry.yaml`.
+- ⏳ **Φάσεις 3–6:** πλήρες decide (redeem → αναμονή → σκέλη), execute,
+  risk/ledger/paper με replay συνθετικών ανοδικών καθεστώτων, units
+  `yield-carry-*`. Testnet μόνο με έγκριση του Giannis.
 
 ## 9. Ανοιχτά — τι μένει
 

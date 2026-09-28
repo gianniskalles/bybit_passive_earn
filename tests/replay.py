@@ -61,6 +61,30 @@ def replay_tool(payload: Dict[str, Any]) -> BybitEarnTool:
                          session=ReplaySession(payload))
 
 
+CARRY_DATA_DIR = DATA_DIR / "carry"
+
+
+class CarryReplaySession(ReplaySession):
+    """Serves carry captures, keyed by carry.client.response_key (path +
+    stable query), so linear and spot answers of one path stay apart. No
+    time shift: carry tests pass now_ms=recorded_at_ms to snapshot.take."""
+
+    def request(self, method, url, headers=None, data=None, timeout=None):
+        from carry.client import response_key
+        key = response_key(url)
+        self.requests.append((method, key))
+        response = self.payload["responses"].get(key)
+        if response is None:
+            raise AssertionError(f"no recorded response for {key}")
+        return _Response(copy.deepcopy(response))
+
+
+def carry_replay_client(payload: Dict[str, Any]):
+    from carry.client import CarryClient
+    return CarryClient(api_key="replay", api_secret="replay", testnet=False,
+                       session=CarryReplaySession(payload, now_ms=int(payload["recorded_at_ms"])))
+
+
 def mutate(payload: Dict[str, Any], path: str, fn: Callable[[Any], None]) -> Dict[str, Any]:
     """Return a copy of `payload` with fn applied to responses[path]['result']."""
     out = copy.deepcopy(payload)

@@ -5,6 +5,8 @@ BYBIT_TESTNET=1 — it never touches mainnet.
   capture    read-only: save the real responses of every endpoint the cycle
              reads to tests/data/testnet_<utc>.json (replayable format:
              {"recorded_at_ms", "responses": {path: raw response}}).
+  carry-capture  read-only: one carry snapshot (carry/snapshot.py) with every
+             raw response saved to tests/data/carry/testnet_<utc>.json.
   roundtrip  Stake the product minimum, wait for a final status, Redeem it,
              wait again. Orders are built by the SAME code as production
              (executor -> place_order_request). Every raw response is saved
@@ -33,9 +35,12 @@ import requests  # noqa: E402
 
 import settings  # noqa: E402
 from bybit_earn_tool import BybitEarnTool, _truthy  # noqa: E402
+from carry import snapshot as carry_snapshot  # noqa: E402
+from carry.client import CarryClient, response_key  # noqa: E402
 from executor import Executor  # noqa: E402
 
 DATA_DIR = ROOT / "tests" / "data"
+CARRY_DATA_DIR = DATA_DIR / "carry"
 
 
 class RecordingSession(requests.Session):
@@ -52,7 +57,8 @@ class RecordingSession(requests.Session):
         except ValueError:
             body = {"_non_json": resp.text[:500]}
         path = urllib.parse.urlparse(url).path
-        self.log.append({"method": method, "path": path, "query": urllib.parse.urlparse(url).query,
+        self.log.append({"method": method, "path": path, "key": response_key(url),
+                         "query": urllib.parse.urlparse(url).query,
                          "request_body": json.loads(kw["data"]) if kw.get("data") else None,
                          "status": resp.status_code, "response": body,
                          "ts_ms": int(time.time() * 1000)})
@@ -86,6 +92,26 @@ def capture(coin: str) -> Path:
            "responses": {e["path"]: e["response"] for e in session.log}}
     path = DATA_DIR / f"testnet_{_stamp()}.json"
     path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
+    return path
+
+
+def carry_capture() -> Path:
+    """Read-only: one carry snapshot on testnet (CARRY_PLAN Phase 2), every
+    raw response saved keyed by response_key() for tests/test_carry_phase2.py."""
+    _tool()   # the testnet + credentials refusals
+    import yaml
+    cfg = yaml.safe_load((ROOT / "config" / "carry.yaml").read_text())
+    session = RecordingSession()
+    snap = carry_snapshot.take(CarryClient(session=session, testnet=True), cfg)
+    out = {"_comment": "REAL testnet capture, scripts/testnet.py carry-capture",
+           "recorded_at_ms": snap.taken_ms,
+           "snapshot_errors": dict(snap.errors), "snapshot_stale": dict(snap.stale),
+           "responses": {e["key"]: e["response"] for e in session.log}}
+    CARRY_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path = CARRY_DATA_DIR / f"testnet_{_stamp()}.json"
+    path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
+    for k, v in {**snap.errors, **snap.stale}.items():
+        print(f"  {k}: {v}", file=sys.stderr)
     return path
 
 
@@ -129,11 +155,16 @@ def roundtrip(coin: str, timeout_s: int) -> Path:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("command", choices=["capture", "roundtrip"])
+    ap.add_argument("command", choices=["capture", "roundtrip", "carry-capture"])
     ap.add_argument("--coin", default="USDT")
     ap.add_argument("--timeout", type=int, default=600, help="seconds to wait for a final status")
     args = ap.parse_args(argv)
-    path = capture(args.coin) if args.command == "capture" else roundtrip(args.coin, args.timeout)
+    if args.command == "carry-capture":
+        path = carry_capture()
+    elif args.command == "capture":
+        path = capture(args.coin)
+    else:
+        path = roundtrip(args.coin, args.timeout)
     print(f"saved {path}")
     return 0
 
