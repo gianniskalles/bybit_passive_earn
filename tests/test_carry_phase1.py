@@ -30,7 +30,7 @@ UNSET_IN_SHIPPED = {"MAX_ENTRY_BASIS_BPS", "MAX_SPREAD_BPS", "TOTAL_CAPITAL_CAP_
 def complete(**over):
     cfg = yaml.safe_load(SHIPPED.read_text())
     cfg.update(MAX_ENTRY_BASIS_BPS=10, MAX_SPREAD_BPS=5, TOTAL_CAPITAL_CAP_USD=1000,
-               MAX_NOTIONAL_PER_SYMBOL_USD=400, USDT_BUFFER_USD=100,
+               MAX_NOTIONAL_PER_SYMBOL_USD=450, USDT_BUFFER_USD=100,
                DEADMAN_URL="https://hc-ping.com/abc")
     cfg.update(over)
     return cfg
@@ -55,14 +55,67 @@ def test_complete_config_is_valid():
     assert cc.validate(complete(), testnet=False) == []
 
 
-def test_shipped_thresholds_come_from_the_calibration_report():
+def test_shipped_thresholds_are_decision_13_8():
+    """No calibration set ever entered, so its choice meant nothing; the
+    thresholds are Giannis's (decision 13.8)."""
     cfg = yaml.safe_load(SHIPPED.read_text())
-    report = (REPO / "calibration" / "CARRY_CALIBRATION.md").read_text()
-    block = yaml.safe_load(report.split("```yaml\n", 1)[1].split("```", 1)[0])
-    for k, v in block.items():
-        if v is not None:
-            assert cfg[k] == v, k
-    assert "calibration/CARRY_CALIBRATION.md" in cfg["CALIBRATION_SOURCE"]
+    assert (cfg["MIN_HOLD_HOURS"], cfg["SMOOTHING_SETTLEMENTS"], cfg["EXIT_HORIZON_HOURS"],
+            cfg["ENTRY_MIN_EXPECTED_APR"]) == (336, 9, 168, 0.05)
+    assert "13.8" in cfg["CALIBRATION_SOURCE"]
+
+
+DAY_MS = 86_400_000
+EIGHT_H_MS = 8 * 3_600_000
+
+
+def _shipped_params():
+    """The shipped funding thresholds. Funding history has no order book, so
+    the basis/spread checks are off here (as in the calibration); with a limit
+    set and basis unknown, decide() never enters."""
+    import dataclasses
+    return dataclasses.replace(cc.to_params(complete()), max_entry_basis_bps=None,
+                               max_spread_bps=None)
+
+
+def test_steady_funding_of_001_pct_per_8h_enters():
+    """0.01 %/8h (~11 % APR) for 30 days against layer A at the measured 1.73 %."""
+    from carry import backtest as bt
+    start = 1_700_000_000_000 - 1_700_000_000_000 % EIGHT_H_MS
+    funding = [(start + i * EIGHT_H_MS, 0.0001) for i in range(30 * 3)]
+    res = bt.simulate(funding, [(start, 0.0173)], _shipped_params())
+    assert res.entries >= 1
+
+
+def test_real_180_days_with_decision_13_8():
+    """The saved VPS data (calibration/carry_data_*.json).
+
+    Decision 13.8 expected NO entry here; the data says otherwise: one entry
+    per symbol (ETH 2026-08-22, BTC 2026-08-24, smoothed funding ~10 % APR),
+    held to the end, no exit, a small gain over layer A. Pinned as measured;
+    whether the thresholds should change is Giannis's call (HANDOFF §8α)."""
+    from carry import backtest as bt
+    path = sorted((REPO / "calibration").glob("carry_data_*.json"))[-1]
+    data = json.loads(path.read_text())
+    entries = {}
+    for sym, d in data["symbols"].items():
+        res = bt.simulate([tuple(x) for x in d["funding"]], data["layer_a"]["points"],
+                          _shipped_params(), symbol=sym)
+        assert res.settlements > 500, sym
+        entries[sym] = (res.entries, res.exits)
+        assert res.excess_apr > 0 and res.worst_30d_return > -0.005, sym
+    assert entries == {"BTCUSDT": (1, 0), "ETHUSDT": (1, 0)}
+
+
+def test_capital_split_follows_decision_13_9():
+    """USDT_BUFFER_USD >= 10 % of the cap; per symbol <= half of what is left."""
+    assert cc.validate(complete(TOTAL_CAPITAL_CAP_USD=1000, USDT_BUFFER_USD=100,
+                                MAX_NOTIONAL_PER_SYMBOL_USD=450), testnet=False) == []
+    assert "USDT_BUFFER_USD" in keys_of(cc.validate(
+        complete(TOTAL_CAPITAL_CAP_USD=1000, USDT_BUFFER_USD=99,
+                 MAX_NOTIONAL_PER_SYMBOL_USD=400), testnet=False))
+    assert "MAX_NOTIONAL_PER_SYMBOL_USD" in keys_of(cc.validate(
+        complete(TOTAL_CAPITAL_CAP_USD=1000, USDT_BUFFER_USD=100,
+                 MAX_NOTIONAL_PER_SYMBOL_USD=451), testnet=False))
 
 
 @pytest.mark.parametrize("field,value", [

@@ -7,7 +7,8 @@ Three layers:
   1. Types and ranges for every field; a missing or null field is an error
      ("unset" — rule 7: unknown is never guessed).
   2. Relations: hysteresis (entry > exit floor), MMR_WARN < MMR_REDUCE <
-     MMR_EMERGENCY, per-symbol notional <= total cap.
+     MMR_EMERGENCY, buffer >= 10 % of the cap, per-symbol notional <=
+     (cap - buffer) / 2 (decision 13.9).
   3. Production floors (decision 13.1: no threshold is loosened to make the
      strategy trade). Only a config with TESTNET_ONLY: true may go below
      them, and such a config is refused unless BYBIT_TESTNET is set.
@@ -24,6 +25,7 @@ import yaml
 from carry.decide import Params
 
 ALLOWED_SYMBOLS = ("BTCUSDT", "ETHUSDT")   # decision Δ2; widening needs a new measurement
+BUFFER_SHARE = 0.10                        # decision 13.9
 
 
 class CarryConfigError(ValueError):
@@ -126,9 +128,15 @@ def validate(cfg: Any, testnet: bool) -> List[str]:
     if ok("MMR_WARN", "MMR_REDUCE", "MMR_EMERGENCY") and not (
             cfg["MMR_WARN"] < cfg["MMR_REDUCE"] < cfg["MMR_EMERGENCY"]):
         errors.append("MMR_WARN: must satisfy MMR_WARN < MMR_REDUCE < MMR_EMERGENCY")
-    if ok("MAX_NOTIONAL_PER_SYMBOL_USD", "TOTAL_CAPITAL_CAP_USD") and \
-            cfg["MAX_NOTIONAL_PER_SYMBOL_USD"] > cfg["TOTAL_CAPITAL_CAP_USD"]:
-        errors.append("MAX_NOTIONAL_PER_SYMBOL_USD: must be <= TOTAL_CAPITAL_CAP_USD")
+    # Decision 13.9: buffer >= 10 % of the cap; per symbol <= half of the rest.
+    if ok("USDT_BUFFER_USD", "TOTAL_CAPITAL_CAP_USD") and \
+            cfg["USDT_BUFFER_USD"] < BUFFER_SHARE * cfg["TOTAL_CAPITAL_CAP_USD"]:
+        errors.append(f"USDT_BUFFER_USD: must be >= {BUFFER_SHARE:.0%} of TOTAL_CAPITAL_CAP_USD")
+    elif ok("MAX_NOTIONAL_PER_SYMBOL_USD", "TOTAL_CAPITAL_CAP_USD", "USDT_BUFFER_USD") and \
+            cfg["MAX_NOTIONAL_PER_SYMBOL_USD"] > \
+            (cfg["TOTAL_CAPITAL_CAP_USD"] - cfg["USDT_BUFFER_USD"]) / 2:
+        errors.append("MAX_NOTIONAL_PER_SYMBOL_USD: must be <= "
+                      "(TOTAL_CAPITAL_CAP_USD - USDT_BUFFER_USD) / 2")
 
     if testnet_only and not testnet:
         errors.append("TESTNET_ONLY: this config lowers entry thresholds for a forced testnet "

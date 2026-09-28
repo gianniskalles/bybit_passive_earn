@@ -13,23 +13,29 @@ EARN_COIN: USDT                        # layer A: USDT in Flexible Easy Earn (de
 SPOT_TAKER_FEE: 0.001
 PERP_TAKER_FEE: 0.00055
 
-# Entry / exit (§4). The ⊙ values are the recommended set of the Phase 0B
-# calibration (a NO-GO: no set ever entered in 180 days). Decision 13.1: the
+# Entry / exit (§4). Decision 13.8: the Phase 0B calibration was a NO-GO in
+# which no set ever entered, so its choice meant nothing. With MIN_HOLD 72 h
+# the payback rule needed ~38 % APR; with 336 h, steady 0.01 %/8h (~11 %)
+# enters. On the real last 180 days this set enters once per symbol (late
+# August 2026, ~10 % APR) — see tests/test_carry_phase1.py. Decision 13.1: the
 # entry rule is the gate; nothing is loosened to make it trade.
-CALIBRATION_SOURCE: "calibration/CARRY_CALIBRATION.md (2026-09-27, NO-GO)"
-ENTRY_MIN_EXPECTED_APR: 0.03
+CALIBRATION_SOURCE: "CARRY_PLAN §13.8 (2026-09-28); calibration/CARRY_CALIBRATION.md (NO-GO)"
+ENTRY_MIN_EXPECTED_APR: 0.05
 ENTRY_MIN_PREDICTED_RATE: 5.0e-05
 ENTRY_EV_MULTIPLE: 1                   # MIN_HOLD income must repay >= 1 round trip
 EXIT_PREDICTED_FLOOR: -0.0001
-EXIT_HORIZON_HOURS: 72
-SMOOTHING_SETTLEMENTS: 3
-MIN_HOLD_HOURS: 72
+EXIT_HORIZON_HOURS: 168
+SMOOTHING_SETTLEMENTS: 9
+MIN_HOLD_HOURS: 336
 MAX_ROUND_TRIPS_PER_30D: 2
 NO_FUNDING_ACTION_BEFORE_SETTLEMENT_MIN: 15
-MAX_ENTRY_BASIS_BPS: null              # from live snapshots (Phase 2)
-MAX_SPREAD_BPS: null                   # from live snapshots (Phase 2)
+MAX_ENTRY_BASIS_BPS: null              # from live market data (Phase 2, tools/carry_market_sample.py)
+MAX_SPREAD_BPS: null                   # from live market data (Phase 2, tools/carry_market_sample.py)
 
-# Size — decision Δ3 (an amount you can lose entirely).
+# Size — decisions Δ3 and 13.9. X = an amount you can lose entirely.
+#   TOTAL_CAPITAL_CAP_USD        X
+#   USDT_BUFFER_USD              10 % of X (>= is enforced)
+#   MAX_NOTIONAL_PER_SYMBOL_USD  (X - buffer) / 2 (<= is enforced)
 TOTAL_CAPITAL_CAP_USD: null
 MAX_NOTIONAL_PER_SYMBOL_USD: null
 USDT_BUFFER_USD: null                  # stays in the UTA while a position is open (13.3)
@@ -47,4 +53,4 @@ MMR_EMERGENCY: 0.60
 ADL_RANK_REDUCE: 4
 CVR_DROP_ALERT: 0.05
 UNDERPERFORMANCE_RATIO: 0.5
-DEADMAN_URL: null                      # external liveness check (R33), e.g. healthchecks
+DEADMAN_URL: null                      # external liveness check (R33); set before live (13.9)
