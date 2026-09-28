@@ -16,16 +16,26 @@ Three layers:
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
 from carry.decide import Params
 
-ALLOWED_SYMBOLS = ("BTCUSDT", "ETHUSDT")   # decision Δ2; widening needs a new measurement
+CORE_SYMBOLS = ("BTCUSDT", "ETHUSDT")      # decision Δ2; altcoins need their own GO (13.10)
 BUFFER_SHARE = 0.10                        # decision 13.9
+_SYMBOL_RE = re.compile(r"[A-Z0-9]{2,20}USDT")
+
+# Decision 13.10: an altcoin may be in SYMBOLS only with a GO of its own from
+# tools/carry_alt_calibrate.py, measured with exactly these config values.
+ALT_REPORT_FILE = Path(__file__).resolve().parent.parent / "calibration" / "carry_alt_calibration.json"
+GO_THRESHOLD_KEYS = ("ENTRY_MIN_EXPECTED_APR", "ENTRY_MIN_PREDICTED_RATE", "ENTRY_EV_MULTIPLE",
+                     "EXIT_PREDICTED_FLOOR", "EXIT_HORIZON_HOURS", "SMOOTHING_SETTLEMENTS",
+                     "MIN_HOLD_HOURS", "MAX_ROUND_TRIPS_PER_30D",
+                     "NO_FUNDING_ACTION_BEFORE_SETTLEMENT_MIN", "SPOT_TAKER_FEE", "PERP_TAKER_FEE")
 
 
 class CarryConfigError(ValueError):
@@ -52,8 +62,9 @@ _nonneg = lambda v: _num(v) and v >= 0  # noqa: E731
 # key -> (check, description)
 SCHEMA: Dict[str, Tuple[Callable[[Any], bool], str]] = {
     "SYMBOLS": (lambda v: isinstance(v, list) and bool(v) and len(set(v)) == len(v)
-                and all(s in ALLOWED_SYMBOLS for s in v),
-                f"non-empty list of distinct symbols from {list(ALLOWED_SYMBOLS)}"),
+                and all(isinstance(s, str) and _SYMBOL_RE.fullmatch(s) for s in v),
+                f"non-empty list of distinct <COIN>USDT symbols ({list(CORE_SYMBOLS)}, or an "
+                f"altcoin with its own GO)"),
     "CYCLE_MINUTES": (_pos, "number > 0"),
     "DRY_RUN": (lambda v: isinstance(v, bool), "boolean"),
     "LOG_DIR": (lambda v: isinstance(v, str) and bool(v.strip()), "non-empty path"),
@@ -90,7 +101,9 @@ SCHEMA: Dict[str, Tuple[Callable[[Any], bool], str]] = {
     "CALIBRATION_SOURCE": (lambda v: isinstance(v, str) and bool(v.strip()),
                            "where the ⊙ thresholds come from"),
 }
-OPTIONAL = {"TESTNET_ONLY": (lambda v: isinstance(v, bool), "boolean")}
+OPTIONAL = {"TESTNET_ONLY": (lambda v: isinstance(v, bool), "boolean"),
+            # required as soon as SYMBOLS holds an altcoin (13.10)
+            "MAX_NOTIONAL_PER_ALT_USD": (lambda v: v is None or _pos(v), "number > 0")}
 
 # Floors a production (non-TESTNET_ONLY) config may never go below.
 PRODUCTION_FLOORS: Dict[str, Tuple[Callable[[Any], bool], str]] = {
@@ -102,7 +115,51 @@ PRODUCTION_FLOORS: Dict[str, Tuple[Callable[[Any], bool], str]] = {
 }
 
 
-def validate(cfg: Any, testnet: bool) -> List[str]:
+def alts(cfg: Dict) -> List[str]:
+    return [s for s in cfg.get("SYMBOLS") or [] if s not in CORE_SYMBOLS]
+
+
+def notional_cap(cfg: Dict, symbol: str) -> float:
+    """The per-symbol notional limit: altcoins have their own, smaller one."""
+    if symbol in CORE_SYMBOLS:
+        return cfg["MAX_NOTIONAL_PER_SYMBOL_USD"]
+    return cfg["MAX_NOTIONAL_PER_ALT_USD"]
+
+
+def _alt_errors(cfg: Dict, alt_report: Optional[Dict]) -> List[str]:
+    alt = alts(cfg)
+    if not alt:
+        return []
+    errors = []
+    report = alt_report if isinstance(alt_report, dict) else {}
+    go = set(report.get("go_symbols") or [])
+    measured = report.get("thresholds")
+    current = {k: cfg.get(k) for k in GO_THRESHOLD_KEYS}
+    missing = [s for s in alt if s not in go]
+    if missing:
+        errors.append(f"SYMBOLS: {missing} have no GO of their own "
+                      f"(tools/carry_alt_calibrate.py, decision 13.10)")
+    elif measured != current:
+        errors.append("SYMBOLS: the altcoin GO was measured with other thresholds than this "
+                      "config; re-run tools/carry_alt_calibrate.py")
+    cap = cfg.get("MAX_NOTIONAL_PER_ALT_USD")
+    core = cfg.get("MAX_NOTIONAL_PER_SYMBOL_USD")
+    if cap is None:
+        errors.append("MAX_NOTIONAL_PER_ALT_USD: unset — required when SYMBOLS holds an altcoin")
+    elif _pos(cap) and _pos(core) and not cap < core:
+        errors.append("MAX_NOTIONAL_PER_ALT_USD: must be < MAX_NOTIONAL_PER_SYMBOL_USD")
+    return errors
+
+
+def read_alt_report(path: Path) -> Optional[Dict]:
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def validate(cfg: Any, testnet: bool, alt_report: Optional[Dict] = None) -> List[str]:
+    """alt_report: the committed carry_alt_calibration.json (None = none)."""
     if not isinstance(cfg, dict):
         return ["CONFIG: not a mapping"]
     errors: List[str] = []
@@ -138,6 +195,9 @@ def validate(cfg: Any, testnet: bool) -> List[str]:
         errors.append("MAX_NOTIONAL_PER_SYMBOL_USD: must be <= "
                       "(TOTAL_CAPITAL_CAP_USD - USDT_BUFFER_USD) / 2")
 
+    if "SYMBOLS" not in bad and "MAX_NOTIONAL_PER_ALT_USD" not in bad:
+        errors.extend(_alt_errors(cfg, alt_report))
+
     if testnet_only and not testnet:
         errors.append("TESTNET_ONLY: this config lowers entry thresholds for a forced testnet "
                       "cycle and is refused unless BYBIT_TESTNET is set")
@@ -153,7 +213,7 @@ def load(path: Path, testnet: bool) -> Dict:
         cfg = yaml.safe_load(Path(path).read_text())
     except (OSError, yaml.YAMLError) as e:
         raise CarryConfigError(f"{path}: unreadable: {e}") from e
-    errors = validate(cfg, testnet)
+    errors = validate(cfg, testnet, alt_report=read_alt_report(ALT_REPORT_FILE))
     if errors:
         raise CarryConfigError(f"{path}: " + "; ".join(errors))
     return cfg

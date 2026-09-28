@@ -120,6 +120,29 @@ class CarryPublicClient(BybitEarnTool):
         return self._one("/v5/market/tickers", {"category": category, "symbol": symbol},
                          f"{category} ticker {symbol}")
 
+    def get_linear_tickers(self) -> List[Dict]:
+        """Every linear ticker (for ranking perps by turnover24h)."""
+        endpoint = "/v5/market/tickers"
+        return self._list(self._request("GET", endpoint, {"category": "linear"}), endpoint, "list")
+
+    def get_collateral_ratios(self) -> Dict[str, float]:
+        """{coin: collateral ratio of its first tier} for every coin that can
+        be UTA collateral (GET /v5/spot-margin-trade/collateral, public).
+        The endpoint's shape is UNVERIFIED (§12): any surprise raises, and
+        the caller then treats collateral as unknown."""
+        endpoint = "/v5/spot-margin-trade/collateral"
+        lst = self._list(self._request("GET", endpoint, {}), endpoint, "list")
+        if not lst:
+            raise BybitAPIError(f"{endpoint}: empty list")
+        out: Dict[str, float] = {}
+        for row in lst:
+            try:
+                tiers = row["collateralRatioList"]
+                out[str(row["currency"]).upper()] = float(tiers[0]["collateralRatio"])
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                raise BybitAPIError(f"{endpoint}: unparseable row {row!r}") from e
+        return out
+
     def get_orderbook(self, category: str, symbol: str, limit: int = 50) -> Dict:
         endpoint = "/v5/market/orderbook"
         result = self._request("GET", endpoint, {"category": category, "symbol": symbol,

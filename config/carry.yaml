@@ -39,6 +39,11 @@ MAX_SPREAD_BPS: null                   # from live market data (Phase 2, tools/c
 TOTAL_CAPITAL_CAP_USD: null
 MAX_NOTIONAL_PER_SYMBOL_USD: null
 USDT_BUFFER_USD: null                  # stays in the UTA while a position is open (13.3)
+# Decision 13.10: an altcoin in SYMBOLS needs its own GO
+# (calibration/carry_alt_calibration.json, same thresholds as above) and this
+# limit, which must be below MAX_NOTIONAL_PER_SYMBOL_USD. Unused while SYMBOLS
+# holds only BTC/ETH.
+MAX_NOTIONAL_PER_ALT_USD: null
 MAX_USDT_BORROW_USD: 0
 
 # Earn (decision 13.4): entry waits for a completed redeem; abandoned after this.

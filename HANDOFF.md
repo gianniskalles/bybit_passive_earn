@@ -245,6 +245,20 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     --out /opt/hermes/yield_rotation/calibration &` → commit του
     `CARRY_MARKET_SAMPLE.md` και του `carry_market_<utc>.json`, και οι δύο
     τιμές μπαίνουν στο `config/carry.yaml`.
+- ⏳ **Altcoins (§13.10) — μέτρηση έτοιμη, δεν έχει τρέξει** (γεωγραφικό
+  μπλοκ εδώ). `tools/carry_alt_calibrate.py`: υποψήφια από το top 15 perps
+  σε όγκο (εκτός BTC/ETH, stablecoins) με spot ίδιου base coin, UTA
+  collateral (`/v5/spot-margin-trade/collateral`, σχήμα ανεπιβεβαίωτο — αν
+  δεν διαβαστεί, κανένα υποψήφιο), εισηγμένα ≥ 6 μήνες· GO ανά νόμισμα με τα
+  κατώφλια του config. Στο VPS (δημόσια δεδομένα, χωρίς κλειδί):
+  `sudo -u hermes /opt/hermes/venvs/yield_rotation/bin/python
+  /opt/hermes/yield_rotation/tools/carry_alt_calibrate.py --out
+  /opt/hermes/yield_rotation/calibration` → commit των
+  `CARRY_CALIBRATION_ALTS.md`, `carry_alt_calibration.json`,
+  `carry_alt_data_<utc>.json`. Το config αρνείται altcoin στο `SYMBOLS` χωρίς
+  GO σε αυτό το JSON, με τα ίδια κατώφλια, και χωρίς
+  `MAX_NOTIONAL_PER_ALT_USD` < `MAX_NOTIONAL_PER_SYMBOL_USD`. Η μηνιαία
+  επανάληψη της Φάσης 6 τρέχει και τις δύο μετρήσεις.
 - ⏳ **Φάσεις 3–6:** πλήρες decide (redeem → αναμονή → σκέλη), execute,
   risk/ledger/paper με replay συνθετικών ανοδικών καθεστώτων, units
   `yield-carry-*`. Testnet μόνο με έγκριση του Giannis.
