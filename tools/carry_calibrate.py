@@ -94,7 +94,7 @@ def fetch(symbols, days: int) -> Dict:
             "instrument_linear": client.get_instrument("linear", sym),
             "instrument_spot": client.get_instrument("spot", sym),
         }
-    pid, raw = client.get_usdt_flexible_apr_history()
+    pid, raw = client.get_usdt_flexible_apr_history(start_ms=start, end_ms=end)
     points = sorted((int(r["timestamp"]), apr) for r in raw
                     if isinstance(r, dict) and r.get("timestamp") is not None
                     and (apr := _parse_apr(r.get("apr"))) is not None)

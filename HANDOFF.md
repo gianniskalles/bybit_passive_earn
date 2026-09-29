@@ -187,9 +187,8 @@ pytest                                   # οπουδήποτε· CI σε κάθ
 Ουδέτερη θέση (long spot + short perp) πάνω στο ίδιο πλαίσιο ασφαλείας,
 **χωρίς LLM**. Κατάσταση:
 
-- ⛔ **Πύλη 0Α (Giannis): εκκρεμεί.** Πρόσβαση σε USDT perpetuals από
-  λογαριασμό ΕΟΧ μετά το MiCA, Easy Earn/BYUSDT, subaccount. Αν αποτύχει,
-  το σχέδιο σταματά — καμία παράκαμψη.
+- ✅ **Πύλη 0Α (Giannis): επιβεβαιώθηκε στις 26/9/2026** — πρόσβαση σε USDT
+  perpetuals από τον λογαριασμό, Easy Earn, subaccount.
 - ✅ **Φάση 0Β — κώδικας:** `carry/decide.py` (καθαρή απόφαση της §4, η ίδια
   που θα καλεί η παραγωγή), `carry/client.py` (μόνο δημόσια endpoints,
   fail-closed), `carry/backtest.py`, `tools/carry_calibrate.py`.
@@ -212,7 +211,7 @@ pytest                                   # οπουδήποτε· CI σε κάθ
   - `config/carry.yaml`: κατώφλια της απόφασης §13.8 (MIN_HOLD 336 h,
     smoothing 9, horizon 168 h, 5% APR). 0,01%/8h μπαίνει· στα πραγματικά
     180 ημέρες γίνεται **μία** είσοδος ανά σύμβολο (τέλη Αυγούστου) — η §13.8
-    περίμενε καμία· εκκρεμεί απόφαση Giannis. Κεφάλαιο §13.11: cap 100, buffer 15, 80 ανά σύμβολο, `SYMBOLS:
+    περίμενε καμία· απόφαση 13.12: σωστή συμπεριφορά, κλειδωμένη στο test. Κεφάλαιο §13.11: cap 100, buffer 15, 80 ανά σύμβολο, `SYMBOLS:
     [ETHUSDT]`, altcoin 30. **Null:** `MAX_ENTRY_BASIS_BPS`, `MAX_SPREAD_BPS`
     (ζωντανά δεδομένα, Φάση 2)· `DEADMAN_URL` πριν το live.
   - `config/carry.testnet.yaml`: χαμηλωμένα κατώφλια για τον αναγκαστικό

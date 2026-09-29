@@ -175,6 +175,76 @@ def test_unparseable_funding_row_raises():
         CarryPublicClient(session=s).get_funding_history("BTCUSDT", T0, T0 + DAY)
 
 
+class AprServer:
+    """/v5/earn/product and /v5/earn/apr-history honouring startTime/endTime;
+    without them it returns only the last 7 days, as Bybit did on the VPS."""
+
+    def __init__(self, first_ms, last_ms, fail_at=None):
+        self.points = list(range(first_ms, last_ms + 1, H))
+        self.headers, self.windows, self.fail_at = {}, [], fail_at
+
+    def request(self, method, url, headers=None, data=None, timeout=None):
+        import urllib.parse
+        u = urllib.parse.urlparse(url)
+        q = dict(urllib.parse.parse_qsl(u.query))
+        if u.path == "/v5/earn/product":
+            return _Resp({"retCode": 0, "retMsg": "OK", "result": {"list": [
+                {"coin": "USDT", "productId": "1", "category": "FlexibleSaving"}]}})
+        if "startTime" in q:
+            s, e = int(q["startTime"]), int(q["endTime"])
+            self.windows.append((s, e))
+            if self.fail_at is not None and len(self.windows) == self.fail_at:
+                return _Resp({"retCode": 10016, "retMsg": "server error", "result": {}})
+        else:
+            e = self.points[-1]
+            s = e - 7 * DAY
+        rows = [{"timestamp": str(t), "apr": "1.73%"} for t in self.points if s <= t <= e]
+        return _Resp({"retCode": 0, "retMsg": "OK", "result": {"list": rows[::-1]}})
+
+
+def test_layer_a_history_covers_the_requested_180_days():
+    end = T0 + 200 * DAY
+    srv = AprServer(T0, end)
+    pid, rows = CarryPublicClient(session=srv).get_usdt_flexible_apr_history(
+        start_ms=end - 180 * DAY, end_ms=end)
+    ts = sorted(int(r["timestamp"]) for r in rows)
+    assert pid == "1"
+    assert ts[0] <= end - 180 * DAY + H and ts[-1] == end
+    assert len(ts) == len(set(ts))                           # windows do not double-count
+    assert all(e - s <= 7 * DAY for s, e in srv.windows)     # never beyond the observed window
+    assert srv.windows[0][1] == end                           # newest first, walking back
+
+
+def test_layer_a_history_failure_in_any_window_raises():
+    end = T0 + 200 * DAY
+    with pytest.raises(BybitAPIError):
+        CarryPublicClient(session=AprServer(T0, end, fail_at=3)).get_usdt_flexible_apr_history(
+            start_ms=end - 180 * DAY, end_ms=end)
+
+
+def test_calibrate_fetch_asks_for_the_whole_period(monkeypatch):
+    calls = {}
+
+    class Client:
+        base_url = "x"
+
+        def get_funding_history(self, sym, start, end):
+            return [(start + i * 8 * H, 0.0001) for i in range(40)]
+
+        def get_instrument(self, cat, sym):
+            return {}
+
+        def get_usdt_flexible_apr_history(self, start_ms=None, end_ms=None):
+            calls["span"] = (start_ms, end_ms)
+            return "1", [{"timestamp": str(start_ms), "apr": "1.7%"}]
+
+    import carry.client
+    monkeypatch.setattr(carry.client, "CarryPublicClient", lambda: Client())
+    data = carry_calibrate.fetch(["BTCUSDT"], 180)
+    s, e = calls["span"]
+    assert e - s == 180 * DAY and data["layer_a"]["points"][0][0] == s
+
+
 # --- the tool end to end (offline) ------------------------------------------ #
 
 def _dataset(tmp_path, rates=None, layer_a=True):

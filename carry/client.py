@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Tuple
 from bybit_earn_tool import BybitAPIError, BybitEarnTool
 
 FUNDING_PAGE = 200
+APR_WINDOW_MS = 7 * 24 * 3600 * 1000      # what Bybit returned by default (VPS, 27/9)
 MAX_PAGES = 20                 # a cursor that does not end is a failure, not "all rows"
 PAGE_LIMIT = 50
 
@@ -151,14 +152,34 @@ class CarryPublicClient(BybitEarnTool):
             raise BybitAPIError(f"{endpoint}: response has no b/a lists")
         return result
 
-    def get_usdt_flexible_apr_history(self) -> Tuple[str, List[Dict]]:
+    def get_usdt_flexible_apr_history(self, start_ms: Optional[int] = None,
+                                      end_ms: Optional[int] = None) -> Tuple[str, List[Dict]]:
         """(productId, raw APR history) of the USDT FlexibleSaving product —
-        the Easy Earn rate of layer A."""
+        the Easy Earn rate of layer A.
+
+        Without a range Bybit returns only the last ~7 days. With one, the
+        range is walked backwards in APR_WINDOW_MS windows (startTime/endTime;
+        a longer window is not confirmed to work) and de-duplicated. Any
+        window that fails raises: a partial history is not a history."""
         products = [p for p in self.get_earn_products(coin="USDT") if p.get("coin") == "USDT"]
         if not products:
             raise BybitAPIError("no USDT FlexibleSaving product")
         pid = str(products[0]["productId"])
-        return pid, self.get_earn_apr_history(product_id=pid)
+        if start_ms is None or end_ms is None:
+            return pid, self.get_earn_apr_history(product_id=pid)
+        endpoint = "/v5/earn/apr-history"
+        rows: Dict[str, Dict] = {}
+        hi = int(end_ms)
+        while hi >= start_ms:
+            lo = max(int(start_ms), hi - APR_WINDOW_MS)
+            result = self._request("GET", endpoint, {"category": "FlexibleSaving", "productId": pid,
+                                                     "startTime": lo, "endTime": hi})
+            for r in self._list(result, endpoint, "list"):
+                if not isinstance(r, dict) or not str(r.get("timestamp", "")).isdigit():
+                    raise BybitAPIError(f"{endpoint}: unparseable row {r!r}")
+                rows[str(r["timestamp"])] = r
+            hi = lo - 1
+        return pid, sorted(rows.values(), key=lambda r: int(r["timestamp"]))
 
 
 class CarryClient(CarryPublicClient):

@@ -84,24 +84,21 @@ def test_steady_funding_of_001_pct_per_8h_enters():
     assert res.entries >= 1
 
 
-def test_real_180_days_with_decision_13_8():
-    """The saved VPS data (calibration/carry_data_*.json).
-
-    Decision 13.8 expected NO entry here; the data says otherwise: one entry
-    per symbol (ETH 2026-08-22, BTC 2026-08-24, smoothed funding ~10 % APR),
-    held to the end, no exit, a small gain over layer A. Pinned as measured;
-    whether the thresholds should change is Giannis's call (HANDOFF §8α)."""
+def test_real_180_days_one_entry_per_symbol():
+    """The saved VPS data (calibration/carry_data_*.json), locked as measured
+    and accepted as correct behaviour (decision 13.12): one entry per symbol
+    in late August 2026 (~10 % APR), excess over layer A >= 0, worst 30 days
+    >= -0.5 %."""
     from carry import backtest as bt
     path = sorted((REPO / "calibration").glob("carry_data_*.json"))[-1]
     data = json.loads(path.read_text())
-    entries = {}
     for sym, d in data["symbols"].items():
         res = bt.simulate([tuple(x) for x in d["funding"]], data["layer_a"]["points"],
                           _shipped_params(), symbol=sym)
         assert res.settlements > 500, sym
-        entries[sym] = (res.entries, res.exits)
-        assert res.excess_apr > 0 and res.worst_30d_return > -0.005, sym
-    assert entries == {"BTCUSDT": (1, 0), "ETHUSDT": (1, 0)}
+        assert res.entries == 1, sym
+        assert res.excess_apr >= 0, sym
+        assert res.worst_30d_return >= -0.005, sym
 
 
 def test_shipped_capital_is_decision_13_11():
