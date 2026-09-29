@@ -248,20 +248,18 @@ pytest                                   # οπουδήποτε· CI σε κάθ
   minOrderAmt, χρέωση spot στο νόμισμα)· όσα δεν χωράνε στο όριό τους
   εξαιρούνται με `SYMBOL_BELOW_MIN_SIZE`. Με τα συνθετικά: ETH ≈ 25 USD, BTC
   ≈ 65 USD.
-- ⏳ **Altcoins (§13.10) — μέτρηση έτοιμη, δεν έχει τρέξει** (γεωγραφικό
-  μπλοκ εδώ). `tools/carry_alt_calibrate.py`: υποψήφια από το top 15 perps
-  σε όγκο (εκτός BTC/ETH, stablecoins) με spot ίδιου base coin, UTA
-  collateral (`/v5/spot-margin-trade/collateral`, σχήμα ανεπιβεβαίωτο — αν
-  δεν διαβαστεί, κανένα υποψήφιο), εισηγμένα ≥ 6 μήνες· GO ανά νόμισμα με τα
-  κατώφλια του config. Στο VPS (δημόσια δεδομένα, χωρίς κλειδί):
-  `sudo -u hermes /opt/hermes/venvs/yield_rotation/bin/python
+- ✅ **Altcoins (§13.10) — μέτρηση 29/9 (Hermes, VPS): κανένα GO.**
+  `calibration/CARRY_CALIBRATION_ALTS.md`: 10 υποψήφια από το top 15 (SOL, XRP,
+  NEAR, QNT, HYPE, HBAR, LINK, SUI, ONDO, DOGE)· εξαιρέθηκαν ZEC, CL, PUMPFUN,
+  XAU (χωρίς spot) και SOXL (< 6 μήνες). Όλα NO-GO: υπεροχή από −2,65% έως
+  +0,43%, κανένα δεν αντέχει έξοδα ×1,5. Το δημόσιο
+  `/v5/spot-margin-trade/collateral` διαβάστηκε σωστά (το σχήμα επιβεβαιώθηκε).
+  Η μέτρηση έτρεξε πριν από το 180ήμερο ιστορικό του layer A· στη μηνιαία
+  επανάληψη θα έχει πλήρες layer A. Το config απορρίπτει κάθε altcoin στο
+  `SYMBOLS`. Ξανά στο VPS: `sudo -u hermes
+  /opt/hermes/venvs/yield_rotation/bin/python
   /opt/hermes/yield_rotation/tools/carry_alt_calibrate.py --out
-  /opt/hermes/yield_rotation/calibration` → commit των
-  `CARRY_CALIBRATION_ALTS.md`, `carry_alt_calibration.json`,
-  `carry_alt_data_<utc>.json`. Το config αρνείται altcoin στο `SYMBOLS` χωρίς
-  GO σε αυτό το JSON, με τα ίδια κατώφλια, και χωρίς
-  `MAX_NOTIONAL_PER_ALT_USD` < `MAX_NOTIONAL_PER_SYMBOL_USD`. Η μηνιαία
-  επανάληψη της Φάσης 6 τρέχει και τις δύο μετρήσεις.
+  /opt/hermes/yield_rotation/calibration`.
 - ✅ **Φάση 3 — σχέδιο κύκλου** (`carry/plan.py`, καθαρό): snapshot + config +
   risk state + book → ενέργειες, alerts, αλλαγές book.
   - Είσοδος (13.4): αν λείπουν USDT στο UTA, μόνο `EARN_REDEEM_FOR_ENTRY`· τα
