@@ -241,6 +241,7 @@ class Earn:
     redeem_minutes: Optional[float]
     staked: float                     # USDT in the flexible product
     orders: Tuple[EarnOrder, ...]
+    min_stake: Optional[float] = None
 
     def order(self, order_link_id: str) -> Optional[EarnOrder]:
         for o in self.orders:
@@ -410,7 +411,8 @@ def read_earn(client, coin: str) -> Earn:
                                 _s(o, "orderType", wo), _s(o, "status", wo),
                                 _opt_f(o, "orderValue"), int(created) if created else None))
     return Earn(pid, _s(p, "status", where), _pct(p.get("estimateApr"), where),
-                _opt_f(p, "redeemProcessingMinute"), staked, tuple(orders))
+                _opt_f(p, "redeemProcessingMinute"), staked, tuple(orders),
+                _opt_f(p, "minStakeAmount"))
 
 
 def take(client, cfg: Mapping, now_ms: Optional[int] = None, private: bool = True) -> Snapshot:

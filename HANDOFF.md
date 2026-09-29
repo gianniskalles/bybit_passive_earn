@@ -262,7 +262,23 @@ pytest                                   # οπουδήποτε· CI σε κάθ
   GO σε αυτό το JSON, με τα ίδια κατώφλια, και χωρίς
   `MAX_NOTIONAL_PER_ALT_USD` < `MAX_NOTIONAL_PER_SYMBOL_USD`. Η μηνιαία
   επανάληψη της Φάσης 6 τρέχει και τις δύο μετρήσεις.
-- ⏳ **Φάσεις 3–6:** πλήρες decide (redeem → αναμονή → σκέλη), execute,
+- ✅ **Φάση 3 — σχέδιο κύκλου** (`carry/plan.py`, καθαρό): snapshot + config +
+  risk state + book → ενέργειες, alerts, αλλαγές book.
+  - Είσοδος (13.4): αν λείπουν USDT στο UTA, μόνο `EARN_REDEEM_FOR_ENTRY`· τα
+    σκέλη (perp, spot) σε επόμενο κύκλο, μόνο με redeem `Success`. Αποτυχία,
+    `REDEEM_TIMEOUT_HOURS` (`EARN_REDEEM_STUCK`) ή χαμένες συνθήκες → εγκατάλειψη.
+  - Έξοδος (13.5): spot, μετά perp reduceOnly (margin emergency: perp πρώτα)·
+    τα αδρανή USDT πίσω στο Earn στον επόμενο κύκλο, ποτέ το buffer με ανοιχτή
+    θέση, ποτέ άλλο νόμισμα.
+  - Κίνδυνος: ορφανά σκέλη (R14), ADL (R13), drift → εξισορρόπηση προς
+    ουδετερότητα, ADL rank/MMR → TRIM, MMR emergency/UNWIND/όχι Trading/όχι
+    collateral → έξοδος· margin mode, δανεισμός USDT, ξένες εντολές, περιοχή,
+    CVR → καμία είσοδος. Νέοι κωδικοί που μπλοκάρουν το heartbeat:
+    `UNTRACKED_POSITION`, `USDT_BORROW_LIMIT`.
+  - Property tests (hypothesis): καμία αύξηση έκθεσης εκτός NORMAL, ποτέ πάνω
+    από τα όρια, UNWIND πάντα βγαίνει, καμία κίνηση funding μέσα στο 15λεπτο,
+    ποτέ spot χωρίς ολοκληρωμένο redeem, στο Earn μόνο USDT.
+- ⏳ **Φάσεις 4–6:** πλήρες decide (redeem → αναμονή → σκέλη), execute,
   risk/ledger/paper με replay συνθετικών ανοδικών καθεστώτων, units
   `yield-carry-*`. Testnet μόνο με έγκριση του Giannis.
 
