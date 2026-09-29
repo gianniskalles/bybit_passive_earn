@@ -20,11 +20,9 @@ REPO = Path(__file__).resolve().parent.parent
 SHIPPED = REPO / "config" / "carry.yaml"
 TESTNET = REPO / "config" / "carry.testnet.yaml"
 
-# Decisions Giannis still has to make (Δ3, R33) and values only live
-# snapshots can give (basis, spread): the shipped config leaves them null,
-# so the cycle refuses to start until they are set.
-UNSET_IN_SHIPPED = {"MAX_ENTRY_BASIS_BPS", "MAX_SPREAD_BPS", "TOTAL_CAPITAL_CAP_USD",
-                    "MAX_NOTIONAL_PER_SYMBOL_USD", "USDT_BUFFER_USD", "DEADMAN_URL"}
+# Values only live data can give (basis, spread, Phase 2) and the dead-man
+# URL (before live, 13.11): null, so the cycle refuses to start until set.
+UNSET_IN_SHIPPED = {"MAX_ENTRY_BASIS_BPS", "MAX_SPREAD_BPS", "DEADMAN_URL"}
 
 
 def complete(**over):
@@ -106,16 +104,25 @@ def test_real_180_days_with_decision_13_8():
     assert entries == {"BTCUSDT": (1, 0), "ETHUSDT": (1, 0)}
 
 
-def test_capital_split_follows_decision_13_9():
-    """USDT_BUFFER_USD >= 10 % of the cap; per symbol <= half of what is left."""
-    assert cc.validate(complete(TOTAL_CAPITAL_CAP_USD=1000, USDT_BUFFER_USD=100,
-                                MAX_NOTIONAL_PER_SYMBOL_USD=450), testnet=False) == []
-    assert "USDT_BUFFER_USD" in keys_of(cc.validate(
-        complete(TOTAL_CAPITAL_CAP_USD=1000, USDT_BUFFER_USD=99,
-                 MAX_NOTIONAL_PER_SYMBOL_USD=400), testnet=False))
+def test_shipped_capital_is_decision_13_11():
+    cfg = yaml.safe_load(SHIPPED.read_text())
+    assert cfg["SYMBOLS"] == ["ETHUSDT"]
+    assert (cfg["TOTAL_CAPITAL_CAP_USD"], cfg["USDT_BUFFER_USD"], cfg["MAX_NOTIONAL_PER_SYMBOL_USD"],
+            cfg["MAX_NOTIONAL_PER_ALT_USD"]) == (100, 15, 80, 30)
+
+
+def test_capital_rules():
+    """Buffer >= 10 % of the cap; the limits of SYMBOLS add up to <= cap - buffer."""
+    one = dict(SYMBOLS=["ETHUSDT"], TOTAL_CAPITAL_CAP_USD=100, USDT_BUFFER_USD=15)
+    assert cc.validate(complete(**one, MAX_NOTIONAL_PER_SYMBOL_USD=85), testnet=False) == []
     assert "MAX_NOTIONAL_PER_SYMBOL_USD" in keys_of(cc.validate(
-        complete(TOTAL_CAPITAL_CAP_USD=1000, USDT_BUFFER_USD=100,
-                 MAX_NOTIONAL_PER_SYMBOL_USD=451), testnet=False))
+        complete(**one, MAX_NOTIONAL_PER_SYMBOL_USD=86), testnet=False))
+    assert "USDT_BUFFER_USD" in keys_of(cc.validate(
+        complete(**dict(one, USDT_BUFFER_USD=9), MAX_NOTIONAL_PER_SYMBOL_USD=50), testnet=False))
+    two = dict(one, SYMBOLS=["BTCUSDT", "ETHUSDT"])
+    assert "MAX_NOTIONAL_PER_SYMBOL_USD" in keys_of(cc.validate(
+        complete(**two, MAX_NOTIONAL_PER_SYMBOL_USD=80), testnet=False))
+    assert cc.validate(complete(**two, MAX_NOTIONAL_PER_SYMBOL_USD=42.5), testnet=False) == []
 
 
 @pytest.mark.parametrize("field,value", [

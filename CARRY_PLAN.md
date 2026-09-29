@@ -433,3 +433,13 @@ DEADMAN_URL: null                # εξωτερικός έλεγχος ζωής 
     `MAX_NOTIONAL_PER_ALT_USD` υποχρεωτικό μόλις μπει altcoin, και μικρότερο
     από το `MAX_NOTIONAL_PER_SYMBOL_USD`. Αντικαθιστά το «μόνο BTC/ETH» της Δ2
     και του R11 υπό αυτούς τους όρους.
+11. **Κεφάλαιο, 29/9 — αντικαθιστά τα νούμερα του 9.** `TOTAL_CAPITAL_CAP_USD: 100`,
+    `USDT_BUFFER_USD: 15`, `MAX_NOTIONAL_PER_SYMBOL_USD: 80`, `SYMBOLS: [ETHUSDT]`,
+    `MAX_NOTIONAL_PER_ALT_USD: 30`. Ο κανόνας «(X − buffer)/2» του 9 γίνεται: τα
+    όρια όλων των `SYMBOLS` μαζί ≤ cap − buffer (80 ≤ 85· με δύο σύμβολα ισοδυναμεί
+    με το μισό). Το buffer ≥ 10% του cap μένει. Το preflight
+    (`carry/preflight.py`) υπολογίζει από το instruments-info την ελάχιστη θέση
+    ανά σύμβολο (και τα δύο σκέλη, η χρέωση του spot στο νόμισμα, R21/R22) και
+    εξαιρεί με alert `SYMBOL_BELOW_MIN_SIZE` όσα δεν χωράνε στο όριό τους.
+    Η επανάληψη «τα πραγματικά 180 ημερών → καμία είσοδος» δεν ισχύει με αυτά τα
+    κατώφλια (βλ. 8)· το test καταγράφει τη μέτρηση μέχρι την απόφαση.

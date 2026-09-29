@@ -212,10 +212,9 @@ pytest                                   # οπουδήποτε· CI σε κάθ
   - `config/carry.yaml`: κατώφλια της απόφασης §13.8 (MIN_HOLD 336 h,
     smoothing 9, horizon 168 h, 5% APR). 0,01%/8h μπαίνει· στα πραγματικά
     180 ημέρες γίνεται **μία** είσοδος ανά σύμβολο (τέλη Αυγούστου) — η §13.8
-    περίμενε καμία· εκκρεμεί απόφαση Giannis. **Null:** `TOTAL_CAPITAL_CAP_USD` = X (Giannis), από αυτό
-    `USDT_BUFFER_USD` = 10% X και `MAX_NOTIONAL_PER_SYMBOL_USD` = (X − buffer)/2
-    (§13.9, επιβάλλεται)· `MAX_ENTRY_BASIS_BPS`, `MAX_SPREAD_BPS` από ζωντανά
-    δεδομένα (Φάση 2)· `DEADMAN_URL` πριν το live.
+    περίμενε καμία· εκκρεμεί απόφαση Giannis. Κεφάλαιο §13.11: cap 100, buffer 15, 80 ανά σύμβολο, `SYMBOLS:
+    [ETHUSDT]`, altcoin 30. **Null:** `MAX_ENTRY_BASIS_BPS`, `MAX_SPREAD_BPS`
+    (ζωντανά δεδομένα, Φάση 2)· `DEADMAN_URL` πριν το live.
   - `config/carry.testnet.yaml`: χαμηλωμένα κατώφλια για τον αναγκαστικό
     κύκλο του testnet (έξοδος με operator UNWIND).
   - `carry/state.py`: δικό του υπογεγραμμένο risk state (profile
@@ -245,6 +244,11 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     --out /opt/hermes/yield_rotation/calibration &` → commit του
     `CARRY_MARKET_SAMPLE.md` και του `carry_market_<utc>.json`, και οι δύο
     τιμές μπαίνουν στο `config/carry.yaml`.
+- `carry/preflight.py`: ελάχιστη θέση ανά σύμβολο από το instruments-info
+  (perp minOrderQty/qtyStep/minNotionalValue, spot basePrecision/minOrderQty/
+  minOrderAmt, χρέωση spot στο νόμισμα)· όσα δεν χωράνε στο όριό τους
+  εξαιρούνται με `SYMBOL_BELOW_MIN_SIZE`. Με τα συνθετικά: ETH ≈ 25 USD, BTC
+  ≈ 65 USD.
 - ⏳ **Altcoins (§13.10) — μέτρηση έτοιμη, δεν έχει τρέξει** (γεωγραφικό
   μπλοκ εδώ). `tools/carry_alt_calibrate.py`: υποψήφια από το top 15 perps
   σε όγκο (εκτός BTC/ETH, stablecoins) με spot ίδιου base coin, UTA

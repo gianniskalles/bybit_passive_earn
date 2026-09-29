@@ -53,7 +53,7 @@ print(json.dumps({
 MODULES = ["run_yield_cycle", "heartbeat", "bybit_earn_tool", "executor", "signing",
            "risk_state", "settings", "notify", "summary", "telegram_bot",
            "carry.decide", "carry.backtest", "carry.client",
-           "carry.config", "carry.state", "carry.snapshot"]
+           "carry.config", "carry.state", "carry.snapshot", "carry.preflight"]
 
 
 def _clean_env(repo=REPO_ROOT, **extra):

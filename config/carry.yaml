@@ -2,7 +2,7 @@
 # and checked by carry/config.py; the cycle refuses to start on any problem.
 # DRY_RUN: true = paper trading. Only Giannis sets it to false (§10).
 
-SYMBOLS: [BTCUSDT, ETHUSDT]            # decision Δ2
+SYMBOLS: [ETHUSDT]                     # decision 13.11 (Δ2: BTC/ETH; alts need their own GO)
 CYCLE_MINUTES: 5
 DRY_RUN: true
 LOG_DIR: /opt/hermes/logs/carry
@@ -32,18 +32,18 @@ NO_FUNDING_ACTION_BEFORE_SETTLEMENT_MIN: 15
 MAX_ENTRY_BASIS_BPS: null              # from live market data (Phase 2, tools/carry_market_sample.py)
 MAX_SPREAD_BPS: null                   # from live market data (Phase 2, tools/carry_market_sample.py)
 
-# Size — decisions Δ3 and 13.9. X = an amount you can lose entirely.
-#   TOTAL_CAPITAL_CAP_USD        X
-#   USDT_BUFFER_USD              10 % of X (>= is enforced)
-#   MAX_NOTIONAL_PER_SYMBOL_USD  (X - buffer) / 2 (<= is enforced)
-TOTAL_CAPITAL_CAP_USD: null
-MAX_NOTIONAL_PER_SYMBOL_USD: null
-USDT_BUFFER_USD: null                  # stays in the UTA while a position is open (13.3)
+# Size — decisions Δ3, 13.9, 13.11. Enforced: buffer >= 10 % of the cap; the
+# limits of all SYMBOLS add up to <= cap - buffer. The cycle also leaves out
+# (with an alert) any symbol whose minimum position (instruments-info) does
+# not fit its limit — carry/preflight.py.
+TOTAL_CAPITAL_CAP_USD: 100
+MAX_NOTIONAL_PER_SYMBOL_USD: 80
+USDT_BUFFER_USD: 15                    # stays in the UTA while a position is open (13.3)
 # Decision 13.10: an altcoin in SYMBOLS needs its own GO
 # (calibration/carry_alt_calibration.json, same thresholds as above) and this
 # limit, which must be below MAX_NOTIONAL_PER_SYMBOL_USD. Unused while SYMBOLS
 # holds only BTC/ETH.
-MAX_NOTIONAL_PER_ALT_USD: null
+MAX_NOTIONAL_PER_ALT_USD: 30
 MAX_USDT_BORROW_USD: 0
 
 # Earn (decision 13.4): entry waits for a completed redeem; abandoned after this.
