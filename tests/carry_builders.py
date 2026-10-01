@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 def cfg(**over) -> Dict:
     c = yaml.safe_load((REPO / "config" / "carry.yaml").read_text())
-    c.update(MAX_ENTRY_BASIS_BPS=10, MAX_SPREAD_BPS=5, DEADMAN_URL="https://hc-ping.com/x")
+    c.update(DEADMAN_URL="https://hc-ping.com/x")
     c.update(over)
     return c
 

@@ -23,7 +23,11 @@ Rules, in order:
        smoothed * periods_per_year - layer_A_apr >= ENTRY_MIN_EXPECTED_APR
        (smoothed - layer_A per period) * periods in MIN_HOLD
            >= ENTRY_EV_MULTIPLE * round trip cost
-       |basis| <= MAX_ENTRY_BASIS_BPS, spread <= MAX_SPREAD_BPS (when set)
+       -MAX_ENTRY_BASIS_BPS <= basis <= MAX_FAVORABLE_BASIS_BPS, spread <=
+       MAX_SPREAD_BPS (when set). One-sided: a perp above spot (basis > 0)
+       favours the short and comes with high funding; only a perp below
+       spot by more than the tolerance is refused. The upper limit is a
+       plausibility check against broken data, not a market view.
        round trips in the last 30 days < MAX_ROUND_TRIPS_PER_30D
   6. Funding exit (after MIN_HOLD, outside the window) only if
        expected income over EXIT_HORIZON_HOURS < -(round trip cost), or
@@ -59,6 +63,8 @@ class Params:
     # configs require >= 1 (carry/config.py); only a TESTNET_ONLY config may
     # lower it, to force a full cycle on testnet.
     entry_ev_multiple: float = 1.0
+    # Basis above this is treated as broken data (no entry); None = no limit.
+    max_favorable_basis_bps: Optional[float] = None
 
     def __post_init__(self):
         if self.entry_min_predicted_rate <= self.exit_predicted_floor:
@@ -204,10 +210,16 @@ def _entry_rule(view, pos, p, smoothed, ppy, expected_apr, out) -> Decision:
         return out("STAY_OUT", None, f"MIN_HOLD income {net_per_period * hold_periods:.5f} "
                                      f"does not pay back {p.entry_ev_multiple} round trip(s) "
                                      f"of {p.round_trip_cost:.5f}")
-    if p.max_entry_basis_bps is not None:
-        if view.basis_bps is None or abs(view.basis_bps) > p.max_entry_basis_bps:
-            return out("STAY_OUT", None, f"basis {view.basis_bps} bps outside "
-                                         f"±{p.max_entry_basis_bps}")
+    if p.max_entry_basis_bps is not None or p.max_favorable_basis_bps is not None:
+        if view.basis_bps is None:
+            return out("STAY_OUT", None, "basis unknown")
+        if p.max_entry_basis_bps is not None and view.basis_bps < -p.max_entry_basis_bps:
+            return out("STAY_OUT", None, f"basis {view.basis_bps:.2f} bps: perp below spot by more "
+                                         f"than MAX_ENTRY_BASIS_BPS {p.max_entry_basis_bps}")
+        if p.max_favorable_basis_bps is not None and view.basis_bps > p.max_favorable_basis_bps:
+            return out("STAY_OUT", None, f"basis {view.basis_bps:.2f} bps > MAX_FAVORABLE_BASIS_BPS "
+                                         f"{p.max_favorable_basis_bps}: implausible, treated as "
+                                         f"broken data")
     if p.max_spread_bps is not None:
         if view.spread_bps is None or view.spread_bps > p.max_spread_bps:
             return out("STAY_OUT", None, f"spread {view.spread_bps} bps > {p.max_spread_bps}")

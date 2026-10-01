@@ -42,6 +42,19 @@ def test_enters_directly_when_the_uta_already_holds_enough_usdt():
     assert kinds(plan) == ["ENTER"]
 
 
+@pytest.mark.parametrize("basis, enters", [(15.0, True), (0.0, True), (-5.5, True),
+                                           (-10.0, False), (150.0, False)])
+def test_basis_check_is_one_sided_with_the_shipped_limits(basis, enters):
+    """High funding (0.03 %/8h). Positive basis (perp above spot) favours the
+    short; only basis < -MAX_ENTRY_BASIS_BPS (6) or > MAX_FAVORABLE_BASIS_BPS
+    (100, broken data) blocks the entry."""
+    c = cfg()
+    assert (c["MAX_ENTRY_BASIS_BPS"], c["MAX_FAVORABLE_BASIS_BPS"]) == (6, 100)
+    snap = snapshot(markets={"ETHUSDT": market(basis_bps=basis)}, acct=account(usdt=100.0))
+    plan = cp.plan_cycle(snap, c, "NORMAL", {}, "c1")
+    assert ("ENTER" in kinds(plan)) is enters, plan.decisions["ETHUSDT"].reason
+
+
 def test_redeems_first_and_never_buys_spot_in_the_same_cycle():
     plan = cp.plan_cycle(snapshot(acct=account(usdt=10.0)), cfg(), "NORMAL", {}, "c1")
     assert kinds(plan) == ["EARN_REDEEM_FOR_ENTRY"]

@@ -81,7 +81,8 @@ SCHEMA: Dict[str, Tuple[Callable[[Any], bool], str]] = {
     "MIN_HOLD_HOURS": (_nonneg, "number >= 0"),
     "MAX_ROUND_TRIPS_PER_30D": (lambda v: _int(v) and v >= 0, "integer >= 0"),
     "NO_FUNDING_ACTION_BEFORE_SETTLEMENT_MIN": (_nonneg, "number >= 0"),
-    "MAX_ENTRY_BASIS_BPS": (_pos, "number > 0"),
+    "MAX_ENTRY_BASIS_BPS": (_pos, "number > 0 (tolerance for a perp BELOW spot)"),
+    "MAX_FAVORABLE_BASIS_BPS": (_pos, "number > 0 (perp above spot beyond this = broken data)"),
     "MAX_SPREAD_BPS": (_pos, "number > 0"),
     "TOTAL_CAPITAL_CAP_USD": (_pos, "number > 0 (decision Δ3)"),
     "MAX_NOTIONAL_PER_SYMBOL_USD": (_pos, "number > 0"),
@@ -182,6 +183,9 @@ def validate(cfg: Any, testnet: bool, alt_report: Optional[Dict] = None) -> List
     if ok("ENTRY_MIN_PREDICTED_RATE", "EXIT_PREDICTED_FLOOR") and \
             cfg["ENTRY_MIN_PREDICTED_RATE"] <= cfg["EXIT_PREDICTED_FLOOR"]:
         errors.append("ENTRY_MIN_PREDICTED_RATE: must exceed EXIT_PREDICTED_FLOOR (hysteresis)")
+    if ok("MAX_ENTRY_BASIS_BPS", "MAX_FAVORABLE_BASIS_BPS") and \
+            cfg["MAX_FAVORABLE_BASIS_BPS"] <= cfg["MAX_ENTRY_BASIS_BPS"]:
+        errors.append("MAX_FAVORABLE_BASIS_BPS: must exceed MAX_ENTRY_BASIS_BPS")
     if ok("MMR_WARN", "MMR_REDUCE", "MMR_EMERGENCY") and not (
             cfg["MMR_WARN"] < cfg["MMR_REDUCE"] < cfg["MMR_EMERGENCY"]):
         errors.append("MMR_WARN: must satisfy MMR_WARN < MMR_REDUCE < MMR_EMERGENCY")
@@ -239,4 +243,5 @@ def to_params(cfg: Dict) -> Params:
         spot_taker_fee=cfg["SPOT_TAKER_FEE"],
         perp_taker_fee=cfg["PERP_TAKER_FEE"],
         entry_ev_multiple=float(cfg["ENTRY_EV_MULTIPLE"]),
+        max_favorable_basis_bps=cfg["MAX_FAVORABLE_BASIS_BPS"],
     )

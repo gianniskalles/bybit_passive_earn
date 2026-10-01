@@ -156,7 +156,8 @@ def fetch(top: int, days: int) -> Dict:
 def calibrate_alts(data: Dict, cfg: Dict) -> Dict:
     thresholds = {k: cfg[k] for k in cc.GO_THRESHOLD_KEYS}
     # Funding history has no order book: basis/spread are not modelled (as in 0B).
-    params = dataclasses.replace(cc.to_params(cfg), max_entry_basis_bps=None, max_spread_bps=None)
+    params = dataclasses.replace(cc.to_params(cfg), max_entry_basis_bps=None,
+                                 max_favorable_basis_bps=None, max_spread_bps=None)
     layer_a = data["layer_a"]["points"]
     per: Dict[str, Dict] = {}
     for sym, d in data["symbols"].items():

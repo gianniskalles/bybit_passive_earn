@@ -29,8 +29,14 @@ SMOOTHING_SETTLEMENTS: 9
 MIN_HOLD_HOURS: 336
 MAX_ROUND_TRIPS_PER_30D: 2
 NO_FUNDING_ACTION_BEFORE_SETTLEMENT_MIN: 15
-MAX_ENTRY_BASIS_BPS: null              # from live market data (Phase 2, tools/carry_market_sample.py)
-MAX_SPREAD_BPS: null                   # from live market data (Phase 2, tools/carry_market_sample.py)
+# Basis/spread: 24 h of live data, 2026-09-30 (calibration/CARRY_MARKET_SAMPLE.md,
+# tools/carry_market_sample.py). The basis check is one-sided (2026-10-01): a
+# perp above spot favours the short and comes with high funding, so an entry is
+# refused only when basis < -MAX_ENTRY_BASIS_BPS, or when basis >
+# MAX_FAVORABLE_BASIS_BPS, a plausibility limit against broken data.
+MAX_ENTRY_BASIS_BPS: 6                 # ceil(p95 |basis|), BTC/ETH
+MAX_FAVORABLE_BASIS_BPS: 100
+MAX_SPREAD_BPS: 1                      # ceil(p99 spread), BTC/ETH
 
 # Size — decisions Δ3, 13.9, 13.11. Enforced: buffer >= 10 % of the cap; the
 # limits of all SYMBOLS add up to <= cap - buffer. The cycle also leaves out

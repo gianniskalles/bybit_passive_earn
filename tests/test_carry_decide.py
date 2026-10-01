@@ -96,12 +96,43 @@ def test_not_enough_settlements_to_smooth_means_no_entry():
 
 
 def test_entry_basis_and_spread_limits():
-    p = params(max_entry_basis_bps=10, max_spread_bps=5)
+    p = params(max_entry_basis_bps=10, max_favorable_basis_bps=100, max_spread_bps=5)
     good = dict(predicted=0.0003, settled=(0.0003,) * 9)
     assert decide_symbol(view(basis_bps=3, spread_bps=1, **good), OUT, p).action == "ENTER"
     assert decide_symbol(view(basis_bps=-12, spread_bps=1, **good), OUT, p).action == "STAY_OUT"
     assert decide_symbol(view(basis_bps=3, spread_bps=9, **good), OUT, p).action == "STAY_OUT"
     assert decide_symbol(view(basis_bps=None, spread_bps=1, **good), OUT, p).action == "STAY_OUT"
+
+
+@pytest.mark.parametrize("basis, action", [
+    (15, "ENTER"),       # perp above spot: favourable for the short, the regime we wait for
+    (60, "ENTER"),
+    (100, "ENTER"),      # the plausibility limit itself is allowed
+    (-5.9, "ENTER"),     # inside the tolerance on the unfavourable side
+    (-10, "STAY_OUT"),   # perp below spot by more than MAX_ENTRY_BASIS_BPS
+    (150, "STAY_OUT"),   # implausible: treated as broken data
+])
+def test_basis_check_is_one_sided(basis, action):
+    """Decision of 2026-10-01: reject only basis < -MAX_ENTRY_BASIS_BPS, and
+    basis > MAX_FAVORABLE_BASIS_BPS as a sanity limit for bad data."""
+    p = params(max_entry_basis_bps=6, max_favorable_basis_bps=100, max_spread_bps=1)
+    d = decide_symbol(view(predicted=0.0003, settled=(0.0003,) * 9, basis_bps=basis,
+                           spread_bps=0.5), OUT, p)
+    assert d.action == action, d.reason
+
+
+def test_implausible_basis_reason_names_the_limit():
+    p = params(max_entry_basis_bps=6, max_favorable_basis_bps=100)
+    d = decide_symbol(view(predicted=0.0003, settled=(0.0003,) * 9, basis_bps=150), OUT, p)
+    assert "MAX_FAVORABLE_BASIS_BPS" in d.reason
+    d = decide_symbol(view(predicted=0.0003, settled=(0.0003,) * 9, basis_bps=-10), OUT, p)
+    assert "MAX_ENTRY_BASIS_BPS" in d.reason
+
+
+def test_basis_limits_never_block_an_exit():
+    p = params(max_entry_basis_bps=6, max_favorable_basis_bps=100)
+    v = view(predicted=-0.001, settled=(-0.0005,) * 9, basis_bps=-500)
+    assert decide_symbol(v, held(), p).action == "EXIT"
 
 
 # --- §9 tests --------------------------------------------------------------- #

@@ -212,8 +212,9 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     smoothing 9, horizon 168 h, 5% APR). 0,01%/8h μπαίνει· στα πραγματικά
     180 ημέρες γίνεται **μία** είσοδος ανά σύμβολο (τέλη Αυγούστου) — η §13.8
     περίμενε καμία· απόφαση 13.12: σωστή συμπεριφορά, κλειδωμένη στο test. Κεφάλαιο §13.11: cap 100, buffer 15, 80 ανά σύμβολο, `SYMBOLS:
-    [ETHUSDT]`, altcoin 30. **Null:** `MAX_ENTRY_BASIS_BPS`, `MAX_SPREAD_BPS`
-    (ζωντανά δεδομένα, Φάση 2)· `DEADMAN_URL` πριν το live.
+    [ETHUSDT]`, altcoin 30. Basis/spread από τη μέτρηση 24 ωρών (30/9):
+    `MAX_ENTRY_BASIS_BPS: 6`, `MAX_SPREAD_BPS: 1`, και
+    `MAX_FAVORABLE_BASIS_BPS: 100` (13.13). **Null:** `DEADMAN_URL` πριν το live.
   - `config/carry.testnet.yaml`: χαμηλωμένα κατώφλια για τον αναγκαστικό
     κύκλο του testnet (έξοδος με operator UNWIND).
   - `carry/state.py`: δικό του υπογεγραμμένο risk state (profile
@@ -242,7 +243,13 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     /opt/hermes/yield_rotation/tools/carry_market_sample.py --minutes 1440
     --out /opt/hermes/yield_rotation/calibration &` → commit του
     `CARRY_MARKET_SAMPLE.md` και του `carry_market_<utc>.json`, και οι δύο
-    τιμές μπαίνουν στο `config/carry.yaml`.
+    τιμές μπαίνουν στο `config/carry.yaml`. **Έγινε 30/9** (6 και 1 bps).
+    Η αναφορά δίνει και το basis με πρόσημο: στις 24 ώρες ήταν **αρνητικό
+    στο 100%** των δειγμάτων (perp κάτω από spot, −2 έως −8,5 bps).
+  - Ο έλεγχος basis είναι μονόπλευρος (απόφαση 13.13): απόρριψη μόνο όταν
+    basis < −`MAX_ENTRY_BASIS_BPS` (perp κάτω από spot) ή basis >
+    `MAX_FAVORABLE_BASIS_BPS` (100, χαλασμένα δεδομένα). Με τα 6 bps θα
+    απορρίπτονταν 1,9% (BTC) / 3,2% (ETH) των λεπτών της μέτρησης.
 - `carry/preflight.py`: ελάχιστη θέση ανά σύμβολο από το instruments-info
   (perp minOrderQty/qtyStep/minNotionalValue, spot basePrecision/minOrderQty/
   minOrderAmt, χρέωση spot στο νόμισμα)· όσα δεν χωράνε στο όριό τους

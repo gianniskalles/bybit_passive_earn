@@ -38,6 +38,38 @@ def test_recommendation_uses_the_cycle_functions_and_ignores_rare_outliers():
     assert rep["recommended"]["MAX_SPREAD_BPS"] == 1
 
 
+def test_signed_basis_is_recorded_alongside_the_absolute():
+    """The entry check is one-sided (perp above spot is favourable), so the
+    report keeps the sign: a perp 2.5 bps BELOW spot shows as negative."""
+    data = samples("BTCUSDT", 100)
+    for s in data[:10]:                                # 10 % with the perp below spot
+        s["perp_bid"], s["perp_ask"] = 99.971, 99.979
+    rep = cms.analyze(data + samples("ETHUSDT", 100))
+    btc = rep["per_symbol"]["BTCUSDT"]
+    below = basis_bps(99.971, 99.979, 99.996, 100.004)
+    above = basis_bps(100.021, 100.029, 99.996, 100.004)
+    assert below < 0 < above
+    assert btc["basis_bps"]["min"] == pytest.approx(below)
+    assert btc["basis_bps"]["p5"] == pytest.approx(below)
+    assert btc["basis_bps"]["p50"] == pytest.approx(above)
+    assert btc["basis_bps"]["max"] == pytest.approx(above)
+    assert btc["negative_basis_share"] == pytest.approx(0.10)
+    assert btc["abs_basis_bps"]["p95"] == pytest.approx(abs(above))   # the recommendation input
+    assert rep["per_symbol"]["ETHUSDT"]["negative_basis_share"] == 0
+
+
+def test_report_shows_the_signed_basis(tmp_path):
+    data = samples("BTCUSDT", 100) + samples("ETHUSDT", 100)
+    data[0]["perp_bid"], data[0]["perp_ask"] = 99.971, 99.979
+    raw = tmp_path / "carry_market_x.json"
+    raw.write_text(json.dumps({"source": "test", "samples": data}))
+    assert cms.main(["--from-data", str(raw), "--out", str(tmp_path)]) == 0
+    md = (tmp_path / "CARRY_MARKET_SAMPLE.md").read_text()
+    assert "basis με πρόσημο" in md
+    assert "-2.50" in md                               # BTC min, perp below spot
+    assert "| 1.0% |" in md                            # share of negative samples
+
+
 def test_frequent_wide_spreads_raise_the_limit():
     rep = cms.analyze(samples("BTCUSDT", 100, wide_every=2) + samples("ETHUSDT", 100))
     assert rep["recommended"]["MAX_SPREAD_BPS"] >= 40

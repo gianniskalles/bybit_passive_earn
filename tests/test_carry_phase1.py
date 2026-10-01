@@ -20,9 +20,9 @@ REPO = Path(__file__).resolve().parent.parent
 SHIPPED = REPO / "config" / "carry.yaml"
 TESTNET = REPO / "config" / "carry.testnet.yaml"
 
-# Values only live data can give (basis, spread, Phase 2) and the dead-man
-# URL (before live, 13.11): null, so the cycle refuses to start until set.
-UNSET_IN_SHIPPED = {"MAX_ENTRY_BASIS_BPS", "MAX_SPREAD_BPS", "DEADMAN_URL"}
+# The dead-man URL (before live, 13.11): null, so the cycle refuses to start
+# until set.
+UNSET_IN_SHIPPED = {"DEADMAN_URL"}
 
 
 def complete(**over):
@@ -53,6 +53,35 @@ def test_complete_config_is_valid():
     assert cc.validate(complete(), testnet=False) == []
 
 
+def test_shipped_basis_and_spread_come_from_the_24h_market_sample():
+    """CARRY_PLAN §13.9: MAX_ENTRY_BASIS_BPS / MAX_SPREAD_BPS are the
+    recommendation of tools/carry_market_sample.py on 24 h of live data;
+    MAX_FAVORABLE_BASIS_BPS is the 100 bps plausibility limit (2026-10-01)."""
+    cfg = yaml.safe_load(SHIPPED.read_text())
+    sample = json.loads((REPO / "calibration" / "carry_market_sample.json").read_text())
+    assert sample["hours"] >= 23.9
+    rec = sample["recommended"]
+    assert (cfg["MAX_ENTRY_BASIS_BPS"], cfg["MAX_SPREAD_BPS"]) == \
+        (rec["MAX_ENTRY_BASIS_BPS"], rec["MAX_SPREAD_BPS"]) == (6, 1)
+    assert cfg["MAX_FAVORABLE_BASIS_BPS"] == 100
+
+
+@pytest.mark.parametrize("value", [None, 0, -5, "100"])
+def test_max_favorable_basis_is_required_and_positive(value):
+    assert keys_of(cc.validate(complete(MAX_FAVORABLE_BASIS_BPS=value), testnet=False)) == \
+        {"MAX_FAVORABLE_BASIS_BPS"}
+
+
+def test_max_favorable_basis_must_exceed_the_unfavourable_tolerance():
+    errors = cc.validate(complete(MAX_ENTRY_BASIS_BPS=10, MAX_FAVORABLE_BASIS_BPS=8),
+                         testnet=False)
+    assert keys_of(errors) == {"MAX_FAVORABLE_BASIS_BPS"}
+
+
+def test_max_favorable_basis_reaches_the_decision_params():
+    assert cc.to_params(complete(MAX_FAVORABLE_BASIS_BPS=77)).max_favorable_basis_bps == 77
+
+
 def test_shipped_thresholds_are_decision_13_8():
     """No calibration set ever entered, so its choice meant nothing; the
     thresholds are Giannis's (decision 13.8)."""
@@ -72,7 +101,7 @@ def _shipped_params():
     set and basis unknown, decide() never enters."""
     import dataclasses
     return dataclasses.replace(cc.to_params(complete()), max_entry_basis_bps=None,
-                               max_spread_bps=None)
+                               max_spread_bps=None, max_favorable_basis_bps=None)
 
 
 def test_steady_funding_of_001_pct_per_8h_enters():

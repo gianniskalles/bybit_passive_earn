@@ -7,6 +7,8 @@ Samples the linear and spot tickers of every symbol every --interval-s for
 (carry/snapshot.py), and recommends:
 
   MAX_ENTRY_BASIS_BPS = ceil(p95 of |basis|)   over all symbols (>= 1)
+      the cycle uses it one-sided: no entry while basis < -MAX_ENTRY_BASIS_BPS
+      (perp below spot); the report also gives the signed basis distribution
   MAX_SPREAD_BPS      = ceil(p99 of spread)    over all symbols (>= 1)
       spread = the wider of the two legs
 
@@ -75,14 +77,21 @@ def analyze(samples: Sequence[Dict]) -> Dict:
         errors = sum(1 for s in samples if s["symbol"] == sym) - len(good)
         entry = {"samples": len(good), "rejected": errors}
         if good:
-            basis = [abs(basis_bps(s["perp_bid"], s["perp_ask"], s["spot_bid"], s["spot_ask"]))
-                     for s in good]
+            signed = [basis_bps(s["perp_bid"], s["perp_ask"], s["spot_bid"], s["spot_ask"])
+                      for s in good]
             spread = [max(spread_bps(s["perp_bid"], s["perp_ask"]),
                           spread_bps(s["spot_bid"], s["spot_ask"])) for s in good]
-            for name, values in (("abs_basis_bps", basis), ("spread_bps", spread)):
+            for name, values in (("abs_basis_bps", [abs(b) for b in signed]),
+                                 ("spread_bps", spread)):
                 stats = {f"p{p}": percentile(values, p) for p in (50, 95, 99)}
                 stats["max"] = max(values)
                 entry[name] = stats
+            # The entry check is one-sided (perp above spot is favourable), so
+            # the sign matters: > 0 = perp above spot.
+            entry["basis_bps"] = {"min": min(signed),
+                                  **{f"p{p}": percentile(signed, p) for p in (1, 5, 50, 95, 99)},
+                                  "max": max(signed)}
+            entry["negative_basis_share"] = sum(1 for b in signed if b < 0) / len(signed)
         per[sym] = entry
     enough = bool(per) and all(e["samples"] >= MIN_SAMPLES for e in per.values())
     rec = None
@@ -111,8 +120,22 @@ def render(report: Dict, source: str) -> str:
                          f"{s['p50']:.2f} / {s['p95']:.2f} / {s['p99']:.2f} / {s['max']:.2f} |")
         else:
             lines.append(f"| {sym} | 0 | {e['rejected']} | — | — |")
+    lines += ["", "basis με πρόσημο (> 0 = perp πάνω από το spot, ευνοϊκό για το short):", "",
+              "| Σύμβολο | min / p1 / p5 / p50 / p95 / p99 / max (bps) | Αρνητικό basis |",
+              "|---|---|---|"]
+    for sym, e in report["per_symbol"].items():
+        if "basis_bps" in e:
+            b = e["basis_bps"]
+            lines.append(f"| {sym} | " + " / ".join(f"{b[k]:.2f}" for k in
+                                                      ("min", "p1", "p5", "p50", "p95", "p99", "max"))
+                         + f" | {e['negative_basis_share']:.1%} |")
+        else:
+            lines.append(f"| {sym} | — | — |")
     lines += ["", f"Κανόνας: `MAX_ENTRY_BASIS_BPS` = ceil(p{BASIS_PCTL} |basis|), "
-              f"`MAX_SPREAD_BPS` = ceil(p{SPREAD_PCTL} spread), το μέγιστο των συμβόλων, ≥ 1.", ""]
+              f"`MAX_SPREAD_BPS` = ceil(p{SPREAD_PCTL} spread), το μέγιστο των συμβόλων, ≥ 1.",
+              "Ο έλεγχος εισόδου είναι μονόπλευρος: απόρριψη μόνο όταν basis < "
+              "−`MAX_ENTRY_BASIS_BPS` ή basis > `MAX_FAVORABLE_BASIS_BPS` (όριο λογικής, "
+              "χαλασμένα δεδομένα).", ""]
     if report["recommended"]:
         lines += ["```yaml"] + [f"{k}: {v}" for k, v in report["recommended"].items()] + ["```"]
     else:
