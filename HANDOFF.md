@@ -283,9 +283,42 @@ pytest                                   # οπουδήποτε· CI σε κάθ
   - Property tests (hypothesis): καμία αύξηση έκθεσης εκτός NORMAL, ποτέ πάνω
     από τα όρια, UNWIND πάντα βγαίνει, καμία κίνηση funding μέσα στο 15λεπτο,
     ποτέ spot χωρίς ολοκληρωμένο redeem, στο Earn μόνο USDT.
-- ⏳ **Φάσεις 4–6:** πλήρες decide (redeem → αναμονή → σκέλη), execute,
-  risk/ledger/paper με replay συνθετικών ανοδικών καθεστώτων, units
-  `yield-carry-*`. Testnet μόνο με έγκριση του Giannis.
+  - **Εγκρίθηκε 1/10, με διόρθωση (13.14):** το σκέλος spot μετριέται από το
+    `spot_qty` του book, όχι από ολόκληρο το wallet. Υπόλοιπο πέρα από book +
+    dust → `FOREIGN_BALANCE`, καμία είσοδος, ποτέ συναλλαγή σε αυτό. Ένα short
+    εκτός book υιοθετείται χωρίς spot, άρα κλείνει ως orphan.
+- ✅ **Φάση 4 — εκτέλεση** (`carry/execute.py`, `order_request` στο
+  `carry/client.py`):
+  - Είσοδος: perp Sell Limit IOC στην τιμή που καλύπτει την ποσότητα στο
+    orderbook της στιγμής (μη αναγνώσιμο → καμία εντολή) → spot Buy Limit IOC
+    για την ποσότητα που γέμισε, με την χρέωση στο νόμισμα (R22). Επανάληψη
+    με νέο book όσο το IOC γεμίζει λιγότερο, ως `LEG_TIMEOUT_S`· reject → τέλος.
+    Συμφιλίωση (R20): το perp κόβεται στο spot που ήρθε (reduceOnly Market).
+    Χωρίς spot → όλο το perp κλείνει, `ORPHAN_LEG`, escalate `NO_NEW_POSITIONS`.
+  - Έξοδοι (13.14): perp reduceOnly Market (χωρίς τιμή). Spot: Limit IOC στην
+    τιμή από το orderbook της στιγμής· μη αναγνώσιμο, ή υπόλοιπο στο
+    `LEG_TIMEOUT_S` → Market με alert `SPOT_MARKET_SELL`. Πουλιέται μόνο η
+    ποσότητα του book.
+  - R23/R24: ντετερμινιστικό `orderLinkId` (κύκλος, ενέργεια, σκέλος,
+    προσπάθεια). Αποστολή χωρίς απάντηση → αναζήτηση με `orderLinkId`· αν δεν
+    υπάρχει, ξανά με το **ίδιο** link. Spot με άγνωστη έκβαση στο deadline →
+    `pending_spot` στο book, `resolve_pending()` στον επόμενο κύκλο· ως τότε
+    καμία είσοδος στο σύμβολο. Άγνωστο perp → κλείσιμο reduceOnly (καλύπτει
+    και τις δύο περιπτώσεις).
+  - Earn: Redeem/Stake μόνο USDT, έλεγχος με `orderLinkId` πριν την αποστολή.
+  - DRY_RUN: το `execute_plan` αρνείται ζωντανό exchange και το `LiveExchange`
+    αρνείται ξανά κάθε εγγραφή.
+  - Tests: τα 4 της §9 (orphan, partial fill, χρέωση στο νόμισμα, timeout →
+    αναζήτηση) και property test (hypothesis) με τυχαία σφάλματα σε κάθε
+    κλήση: ποτέ short πάνω από το spot, το book ταυτίζεται με το exchange,
+    όλα μέσα στα timeouts· στις εξόδους τα ξένα νομίσματα μένουν ανέγγιχτα.
+  - **Ανεπιβεβαίωτα (testnet, §12):** `cumFeeDetail` στην απάντηση spot
+    (χωρίς αυτό η χρέωση θεωρείται στο νόμισμα, alert
+    `FEE_CURRENCY_ASSUMED`)· retCode 110017 (reduceOnly με μηδενική θέση)·
+    110072 (διπλό `orderLinkId`).
+- ⏳ **Φάσεις 5–6:** risk/ledger/paper με replay συνθετικών ανοδικών
+  καθεστώτων, κύκλος `run_carry_cycle.py`, units `yield-carry-*`. Testnet
+  μόνο με έγκριση του Giannis.
 
 ## 9. Ανοιχτά — τι μένει
 

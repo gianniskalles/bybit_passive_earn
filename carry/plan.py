@@ -30,6 +30,8 @@ Every action is checked against carry/state.is_allowed before it is returned.
 Book transitions that need no exchange confirmation (REDEEMING started,
 abandoned, adopted, closed) are returned in book_updates; transitions that
 depend on fills (ENTER -> OPEN, EXIT -> FLAT) belong to execute.py (Phase 4).
+A symbol with spot orders of unknown fate (pending_spot) gets no entry until
+execute.resolve_pending settles them.
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ class SymbolBook:
     entered_ms: Optional[int] = None
     perp_qty: float = 0.0                        # short size we left it at (ADL check)
     spot_qty: float = 0.0                        # base coin the system holds (net of fees)
+    pending_spot: Tuple[str, ...] = ()           # "Buy:<link>"/"Sell:<link>" of unknown fate
     entry_times: Tuple[int, ...] = ()            # for MAX_ROUND_TRIPS_PER_30D
     collateral_ratio: Optional[float] = None     # last seen (R16)
 
@@ -308,6 +311,8 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
             why_not.append("preflight: minimum position does not fit or market unusable")
         if acct is not None and base in acct.collateral and not acct.collateral[base].active:
             why_not.append(f"{base} not active collateral")
+        if sb.pending_spot:
+            why_not.append(f"unresolved spot orders {list(sb.pending_spot)}")
         no_entry[sym] = tuple(why_not)
         wants = d.action == "ENTER" and not why_not
         size = _entry_size(usable, cfg, spot_fee(snap, sym, cfg)) if wants else None

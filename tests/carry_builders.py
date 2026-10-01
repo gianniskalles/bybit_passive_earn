@@ -42,14 +42,15 @@ def market(symbol="ETHUSDT", rate=0.0003, n=12, minutes_to_settlement=120, price
 
 
 def account(usdt=100.0, coins: Optional[Dict[str, float]] = None, mm_rate=0.02, margin_mode="REGULAR_MARGIN",
-            borrow=0.0, collateral_active=True, collateral_ratio=0.95, symbols=("ETHUSDT", "BTCUSDT")) -> Account:
+            borrow=0.0, collateral_active=True, collateral_ratio=0.95, symbols=("ETHUSDT", "BTCUSDT"),
+            spot_fee=0.001) -> Account:
     c = {"USDT": CoinBalance(usdt, usdt, borrow)}
     for k, v in (coins or {}).items():
         c[k] = CoinBalance(v, v, 0.0)
     fees = {}
     for s in symbols:
         fees[("linear", s)] = (0.00055, 0.0002)
-        fees[("spot", s)] = (0.001, 0.001)
+        fees[("spot", s)] = (spot_fee, spot_fee)
     coll = {s[:-4]: Collateral(collateral_ratio, True, collateral_active) for s in symbols}
     return Account(margin_mode, mm_rate, mm_rate * 2, MappingProxyType(c), MappingProxyType(fees),
                    MappingProxyType(coll))

@@ -6,16 +6,18 @@ a pagination that does not end) raises BybitAPIError. Nothing becomes an
 empty list: "no positions" and "could not read positions" never look the
 same. An empty list from a SUCCESSFUL call is a real answer.
 
-Phase 2 is read-only for trading: market, account, position, order and
-execution reads. The only write remains the Earn place-order inherited from
-BybitEarnTool (Stake/Redeem, built by place_order_request). Trading orders
-(POST /v5/order/create) arrive with execute.py in Phase 4.
+Writes: the Earn place-order inherited from BybitEarnTool (Stake/Redeem,
+built by place_order_request) and, from Phase 4, trading orders
+(POST /v5/order/create) built by order_request() and sent only by
+carry/execute.py. Neither is ever sent while DRY_RUN is true (execute.py
+refuses, and LiveExchange refuses again).
 """
 
 from __future__ import annotations
 
 import urllib.parse
-from typing import Dict, List, Optional, Tuple
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any, Dict, List, Optional, Tuple
 
 from bybit_earn_tool import BybitAPIError, BybitEarnTool
 
@@ -27,6 +29,7 @@ PAGE_LIMIT = 50
 # Our orderLinkIds start with this; anything else on the account is foreign
 # (R2 FOREIGN_ACTIVITY).
 LINK_PREFIX = "cy-"
+ORDER_CREATE_PATH = "/v5/order/create"
 
 # R1: how Bybit refuses a region-restricted account is UNVERIFIED (§12). Both
 # signals only make the system more conservative (NO_NEW_POSITIONS); the first
@@ -55,6 +58,52 @@ def response_key(url: str) -> str:
     params = sorted((k, v) for k, v in urllib.parse.parse_qsl(parsed.query)
                     if k not in _VOLATILE)
     return parsed.path + ("?" + urllib.parse.urlencode(params) if params else "")
+
+
+def fmt_step(value: float, step: float) -> str:
+    """value on the step's grid, as Bybit wants it: a plain decimal string."""
+    st = Decimal(str(step))
+    q = (Decimal(str(value)) / st).to_integral_value(rounding=ROUND_HALF_UP) * st
+    return format(q.normalize(), "f")
+
+
+def order_request(category: str, symbol: str, side: str, order_type: str, qty: float,
+                  qty_step: float, order_link_id: str, price: Optional[float] = None,
+                  tick: Optional[float] = None, reduce_only: bool = False) -> Dict[str, Any]:
+    """The exact request for POST /v5/order/create (CARRY_PLAN Phase 4).
+
+    linear: one-way mode (positionIdx 0); reduceOnly on every order that
+            closes (our short, or a long that is never ours).
+    spot:   isLeverage 0 (never borrows); a Market order states its qty in
+            the base coin (marketUnit baseCoin), never in USDT.
+    Limit orders are IOC: nothing rests on the book after the cycle.
+    """
+    if category not in ("linear", "spot"):
+        raise ValueError(f"category must be linear or spot, got {category!r}")
+    if side not in ("Buy", "Sell") or order_type not in ("Limit", "Market"):
+        raise ValueError(f"bad side/orderType {side!r}/{order_type!r}")
+    if not order_link_id.startswith(LINK_PREFIX):
+        raise ValueError(f"orderLinkId must start with {LINK_PREFIX!r}")
+    if reduce_only and category != "linear":
+        raise ValueError("reduceOnly exists only on linear")
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    body: Dict[str, Any] = {"category": category, "symbol": symbol, "side": side,
+                            "orderType": order_type, "qty": fmt_step(qty, qty_step),
+                            "orderLinkId": order_link_id}
+    if order_type == "Limit":
+        if price is None or tick is None or price <= 0:
+            raise ValueError("a Limit order needs a price and its tick")
+        body.update(price=fmt_step(price, tick), timeInForce="IOC")
+    if category == "linear":
+        body["positionIdx"] = 0
+        if reduce_only:
+            body["reduceOnly"] = True
+    else:
+        body["isLeverage"] = 0
+        if order_type == "Market":
+            body["marketUnit"] = "baseCoin"
+    return {"method": "POST", "path": ORDER_CREATE_PATH, "body": body}
 
 
 class CarryPublicClient(BybitEarnTool):
@@ -247,3 +296,11 @@ class CarryClient(CarryPublicClient):
     def get_executions(self, category: str, symbol: str, start_ms: int) -> List[Dict]:
         return self._paged("/v5/execution/list", {"category": category, "symbol": symbol,
                                                   "startTime": start_ms})
+
+    # ---- writes (Phase 4; sent only by carry/execute.py) ----------------------------
+
+    def create_order(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Send a request built by order_request(), verbatim."""
+        if request.get("method") != "POST" or request.get("path") != ORDER_CREATE_PATH:
+            raise ValueError("create_order only sends POST /v5/order/create requests")
+        return self._request("POST", ORDER_CREATE_PATH, request["body"], signed=True)

@@ -11,7 +11,8 @@ invariants of plan_cycle over random snapshots, books and risk states.
      spot_qty, no entry while a foreign balance is in the wallet
 """
 
-from hypothesis import HealthCheck, given, settings
+import pytest
+from hypothesis import HealthCheck, find, given, settings
 from hypothesis import strategies as st
 
 from carry import plan as cp
@@ -64,17 +65,15 @@ def scenario(draw):
     return state, snap, {"ETHUSDT": sb}, mins, short_qty, spot_qty, foreign
 
 
-def test_scenarios_reach_every_action():
-    from collections import Counter
-    seen = Counter()
-
-    @settings(max_examples=1500, deadline=None, database=None, derandomize=True)
-    @given(scenario())
-    def collect(sc):
-        seen.update(a.kind for a in run(sc).actions)
-    collect()
-    assert {"ENTER", "EARN_REDEEM_FOR_ENTRY", "EXIT", "TRIM", "REBALANCE_TOWARD_NEUTRAL",
-            "EARN_RETURN"} <= set(seen), seen
+@pytest.mark.parametrize("kind", ["ENTER", "EARN_REDEEM_FOR_ENTRY", "EXIT", "TRIM",
+                                  "REBALANCE_TOWARD_NEUTRAL", "EARN_RETURN"])
+def test_scenarios_reach_every_action(kind):
+    """The generator is not vacuous: a search finds a scenario for each
+    action (a targeted search, so the check does not hang on a seed)."""
+    found = find(scenario(), lambda sc: kind in [a.kind for a in run(sc).actions],
+                 settings=settings(max_examples=5000, deadline=None, database=None,
+                                   derandomize=True))
+    assert kind in [a.kind for a in run(found).actions]
 
 
 def run(sc):
