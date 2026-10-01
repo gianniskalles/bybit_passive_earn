@@ -21,7 +21,8 @@ def only(plan, kind):
     return a
 
 
-OPEN = SymbolBook(status="OPEN", entered_ms=NOW - 400 * 3_600_000, perp_qty=0.03)
+OPEN = SymbolBook(status="OPEN", entered_ms=NOW - 400 * 3_600_000, perp_qty=0.03,
+                  spot_qty=0.03)
 
 
 def open_snap(**kw):
@@ -218,7 +219,8 @@ def test_region_restriction_error_sets_no_new_positions():
 
 def test_no_new_positions_allows_delta_reducing():
     snap = open_snap(acct=account(usdt=16.0, coins={"ETH": 0.036}))       # spot 20 % over the short
-    plan = cp.plan_cycle(snap, cfg(), "NO_NEW_POSITIONS", {"ETHUSDT": OPEN}, "c")
+    book = {"ETHUSDT": dataclasses.replace(OPEN, spot_qty=0.036)}         # all of it ours
+    plan = cp.plan_cycle(snap, cfg(), "NO_NEW_POSITIONS", book, "c")
     r = only(plan, "REBALANCE_TOWARD_NEUTRAL")
     assert r.legs == ("spot",) and r.spot_qty == pytest.approx(0.006)
     assert "ENTER" not in kinds(plan)
@@ -286,10 +288,85 @@ def test_collateral_ratio_drop_blocks_entry():
 
 
 def test_untracked_short_is_adopted_and_reported():
+    """The short is adopted, but no spot is: the book never held any, so the
+    wallet's ETH cannot be proven ours. The naked short is closed reduceOnly;
+    the ETH stays untouched as a foreign balance."""
     snap = open_snap()
     plan = cp.plan_cycle(snap, cfg(), "NORMAL", {}, "c")
     assert any(a.startswith("UNTRACKED_POSITION") for a in plan.alerts)
     assert plan.book_updates["ETHUSDT"].status == "OPEN" and "ENTER" not in kinds(plan)
+    assert plan.book_updates["ETHUSDT"].spot_qty == 0
+    e = only(plan, "EXIT")
+    assert e.legs == ("perp",) and e.perp_qty is None
+    assert any(a.startswith("FOREIGN_BALANCE") for a in plan.alerts)
+
+
+# --- foreign coins: the spot leg is the book's quantity, never the wallet's ------------- #
+
+FOREIGN = 0.5
+
+
+def test_foreign_coins_with_a_flat_book_block_the_entry_and_are_never_traded():
+    snap = snapshot(acct=account(usdt=100.0, coins={"ETH": FOREIGN}))
+    plan = cp.plan_cycle(snap, cfg(), "NORMAL", {}, "c1")
+    assert [a for a in plan.actions if a.symbol == "ETHUSDT"] == []
+    assert any(a.startswith("FOREIGN_BALANCE: ETHUSDT") for a in plan.alerts)
+    assert any("foreign" in w for w in plan.no_entry["ETHUSDT"])
+
+
+def test_foreign_coins_after_an_entry_are_not_rebalanced():
+    """The reported bug: FLAT + 0.5 ETH -> ENTER, then the next cycle sold
+    0.5 ETH it never bought. With the book's 0.03 the position is neutral."""
+    snap = open_snap(acct=account(usdt=16.0, coins={"ETH": 0.03 + FOREIGN}))
+    plan = cp.plan_cycle(snap, cfg(), "NORMAL", {"ETHUSDT": OPEN}, "c2")
+    assert "REBALANCE_TOWARD_NEUTRAL" not in kinds(plan)
+    assert all(a.spot_qty is None or a.spot_qty <= 0.03 for a in plan.actions)
+    assert any(a.startswith("FOREIGN_BALANCE: ETHUSDT") for a in plan.alerts)
+
+
+def test_foreign_coins_with_an_open_position_rebalance_only_the_book_quantity():
+    """ADL cut the short 0.03 -> 0.01: the excess spot sold is 0.02 of the
+    book, never the 0.5 that was in the wallet before."""
+    snap = open_snap(acct=account(usdt=16.0, coins={"ETH": 0.03 + FOREIGN}),
+                     positions={"ETHUSDT": short(size=0.01)})
+    plan = cp.plan_cycle(snap, cfg(), "NORMAL", {"ETHUSDT": OPEN}, "c3")
+    r = only(plan, "REBALANCE_TOWARD_NEUTRAL")
+    assert r.legs == ("spot",) and r.spot_qty == pytest.approx(0.02)
+    assert any(a.startswith("ADL_DETECTED") for a in plan.alerts)
+
+
+def test_foreign_coins_are_left_behind_on_exit():
+    snap = open_snap(acct=account(usdt=16.0, coins={"ETH": 0.03 + FOREIGN}),
+                     markets={"ETHUSDT": market(settled=[-0.0005] * 12, rate=-0.0005)})
+    for state in ("NORMAL", "UNWIND"):
+        e = only(cp.plan_cycle(snap, cfg(), state, {"ETHUSDT": OPEN}, "c"), "EXIT")
+        assert e.spot_qty == pytest.approx(0.03)
+    orphan = open_snap(acct=account(usdt=16.0, coins={"ETH": 0.03 + FOREIGN}),
+                       positions={"ETHUSDT": short(size=0.0)})
+    e = only(cp.plan_cycle(orphan, cfg(), "NORMAL", {"ETHUSDT": OPEN}, "c"), "EXIT")
+    assert e.legs == ("spot",) and e.spot_qty == pytest.approx(0.03)
+
+
+def test_trim_never_exceeds_the_book_spot():
+    snap = open_snap(acct=account(usdt=16.0, coins={"ETH": 0.03 + FOREIGN}),
+                     positions={"ETHUSDT": short(size=0.03, adl=4)})
+    t = only(cp.plan_cycle(snap, cfg(), "NORMAL", {"ETHUSDT": OPEN}, "c"), "TRIM")
+    assert t.spot_qty == pytest.approx(0.01)
+
+
+def test_dust_beyond_the_book_is_not_foreign():
+    """Rounding leftovers below the spot minimum order are not an alert."""
+    snap = snapshot(acct=account(usdt=100.0, coins={"ETH": 0.000004}))
+    plan = cp.plan_cycle(snap, cfg(), "NORMAL", {}, "c")
+    assert "ENTER" in kinds(plan)
+    assert not any(a.startswith("FOREIGN_BALANCE") for a in plan.alerts)
+
+
+def test_wallet_below_the_book_counts_only_what_is_there():
+    snap = open_snap(acct=account(usdt=16.0, coins={"ETH": 0.02}))
+    r = only(cp.plan_cycle(snap, cfg(), "NORMAL", {"ETHUSDT": OPEN}, "c"),
+             "REBALANCE_TOWARD_NEUTRAL")
+    assert r.legs == ("perp",) and r.perp_qty == pytest.approx(0.01)
 
 
 def test_round_trip_limit_blocks_entry():

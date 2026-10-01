@@ -2,8 +2,11 @@
 config + risk state + book -> Plan. No IO, no clock (now = snapshot time).
 
 Per symbol, in this order:
-  1. Reconcile what Bybit shows with the book: an untracked short is adopted
-     (UNTRACKED_POSITION); a long perp is never ours and is closed; an orphan
+  1. Reconcile what Bybit shows with the book. The spot leg is the book's
+     spot_qty (capped by the wallet), never the whole wallet: a balance beyond
+     book + dust is FOREIGN_BALANCE — never traded, no entry for the symbol.
+     An untracked short is adopted without spot (UNTRACKED_POSITION), so it
+     is an orphan and closed; a long perp is never ours and is closed; an orphan
      leg (spot without short = liquidation/ADL, or short without spot) is
      closed in this cycle (ORPHAN_LEG); a short smaller than we left it is ADL
      (ADL_DETECTED) and the excess spot is sold (R13, R14).
@@ -60,6 +63,7 @@ class SymbolBook:
     redeem_amount: Optional[float] = None
     entered_ms: Optional[int] = None
     perp_qty: float = 0.0                        # short size we left it at (ADL check)
+    spot_qty: float = 0.0                        # base coin the system holds (net of fees)
     entry_times: Tuple[int, ...] = ()            # for MAX_ROUND_TRIPS_PER_30D
     collateral_ratio: Optional[float] = None     # last seen (R16)
 
@@ -183,7 +187,7 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
         usable = m if (m is not None and f"market:{sym}" not in snap.stale) else None
         pos = snap.positions.get(sym)
         base = sym[:-len("USDT")]
-        spot = acct.balance(base).wallet if acct else None
+        wallet_spot = acct.balance(base).wallet if acct else None
         dust = m.spot.min_qty if m else 0.0
 
         if acct is not None and base in acct.collateral:
@@ -203,10 +207,21 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
         short_qty = (pos.size if pos is not None else None)
         in_pos = sb.status == OPEN or bool(short_qty)
         if sb.status != OPEN and short_qty:
-            alerts.append(f"UNTRACKED_POSITION: {sym} short {short_qty} not in the book; adopted")
-            sb = replace(sb, status=OPEN, entered_ms=None, perp_qty=short_qty,
+            # No spot is adopted: the book never held any, so no coin in the
+            # wallet can be proven ours. The naked short is then an orphan.
+            alerts.append(f"UNTRACKED_POSITION: {sym} short {short_qty} not in the book; adopted "
+                          f"without spot")
+            sb = replace(sb, status=OPEN, entered_ms=None, perp_qty=short_qty, spot_qty=0.0,
                          redeem_link=None, redeem_started_ms=None, redeem_amount=None)
             updates[sym] = sb
+        # The spot leg is the book's quantity, capped by what the wallet holds;
+        # anything beyond book + dust is foreign: never traded, no entry.
+        held = sb.spot_qty if sb.status == OPEN else 0.0
+        spot = None if wallet_spot is None else min(wallet_spot, held)
+        if wallet_spot is not None and _diff(wallet_spot, held) > dust:
+            alerts.append(f"FOREIGN_BALANCE: {sym} {_diff(wallet_spot, held)} {base} beyond the "
+                          f"book ({held}); not traded, no entry")
+            no_entry[sym] = no_entry.get(sym, ()) + ("foreign balance",)
         known = short_qty is not None and spot is not None
         if sb.status == OPEN and known:
             if short_qty == 0 and spot > dust:
@@ -265,7 +280,7 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
                         actions.append(Action(
                             "TRIM", sym, "ADL rank high" if adl_high else "margin reduce",
                             legs=("spot", "perp"), perp_qty=perp_trim,
-                            spot_qty=_floor_to(perp_trim, m.spot.qty_step)))
+                            spot_qty=_floor_to(min(perp_trim, spot), m.spot.qty_step)))
                         continue
 
         # ---- 4. funding decision -------------------------------------------------------

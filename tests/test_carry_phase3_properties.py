@@ -7,6 +7,8 @@ invariants of plan_cycle over random snapshots, books and risk states.
   4. never a funding-motivated action within 15' of the settlement
   5. never spot without a completed redeem; Earn only ever gets USDT, and
      never the buffer while a position is open
+  6. coins beyond the book are never traded: no spot sale above the book's
+     spot_qty, no entry while a foreign balance is in the wallet
 """
 
 from hypothesis import HealthCheck, given, settings
@@ -38,9 +40,10 @@ def scenario(draw):
     short_qty = draw(st.sampled_from([0.0, 0.01, 0.02, 0.03]))
     spot_pick = draw(st.sampled_from(["same", 0.0, 0.01, 0.036]))
     spot_qty = short_qty if spot_pick == "same" else spot_pick
+    foreign = draw(st.sampled_from([0.0, 0.0, 0.5]))       # coins the system never bought
     adl = draw(st.sampled_from([1, 4]))
     acct = account(usdt=draw(st.sampled_from([150.0, 10.0, 95.0, 300.0, 40.0, 0.0])),
-                   coins={"ETH": spot_qty},
+                   coins={"ETH": spot_qty + foreign},
                    mm_rate=draw(st.sampled_from([0.02, 0.3, 0.45, 0.65])),
                    borrow=pick(0, 5), margin_mode=pick("REGULAR_MARGIN", "ISOLATED_MARGIN"),
                    collateral_active=pick(True, False))
@@ -49,6 +52,7 @@ def scenario(draw):
     orders = () if red_status is None else (redeem_order(LINK, red_status),)
     started = NOW - draw(st.integers(0, 200)) * MIN
     sb = SymbolBook(status=status, perp_qty=draw(st.sampled_from([0.0, 0.03])),
+                    spot_qty=spot_qty if status == "OPEN" else 0.0,
                     entered_ms=NOW - draw(st.integers(0, 800)) * 3_600_000,
                     redeem_link=LINK if status == "REDEEMING" else None,
                     redeem_started_ms=started if status == "REDEEMING" else None)
@@ -57,7 +61,7 @@ def scenario(draw):
                                           orders=orders),
                     open_orders=(foreign_order(),) if pick(False, True) else (),
                     region=pick(False, True))
-    return state, snap, {"ETHUSDT": sb}, mins, short_qty, spot_qty
+    return state, snap, {"ETHUSDT": sb}, mins, short_qty, spot_qty, foreign
 
 
 def test_scenarios_reach_every_action():
@@ -94,7 +98,7 @@ def test_no_exposure_increase_outside_normal(sc):
 @SETTINGS
 @given(scenario())
 def test_never_above_the_limits(sc):
-    _, snap, _, _, short_qty, _ = sc
+    _, snap, _, _, short_qty, *_ = sc
     open_notional = short_qty * snap.markets["ETHUSDT"].mark_price
     room = CFG["TOTAL_CAPITAL_CAP_USD"] - CFG["USDT_BUFFER_USD"]
     for a in run(sc).actions:
@@ -107,7 +111,7 @@ def test_never_above_the_limits(sc):
 @SETTINGS
 @given(scenario())
 def test_unwind_with_a_position_always_exits(sc):
-    state, _, book, _, short_qty, spot_qty = sc
+    state, _, book, _, short_qty, *_ = sc
     if state == "UNWIND" and short_qty > 0:
         assert any(a.kind == "EXIT" for a in run(sc).actions)
 
@@ -126,7 +130,7 @@ def test_no_funding_action_within_the_window(sc):
 @SETTINGS
 @given(scenario())
 def test_redeem_and_earn_rules(sc):
-    _, snap, book, _, short_qty, _ = sc
+    _, snap, book, _, short_qty, *_ = sc
     plan = run(sc)
     ks = [a.kind for a in plan.actions]
     assert not ("ENTER" in ks and "EARN_REDEEM_FOR_ENTRY" in ks)
@@ -139,3 +143,18 @@ def test_redeem_and_earn_rules(sc):
         if a.kind == "EARN_RETURN":
             keep = CFG["USDT_BUFFER_USD"] if short_qty > 0 else 0
             assert a.usdt <= snap.account.balance("USDT").wallet - keep + 1e-9
+
+
+@SETTINGS
+@given(scenario())
+def test_foreign_coins_are_never_traded(sc):
+    _, snap, book, _, _, _, foreign = sc
+    sb = book["ETHUSDT"]
+    held = sb.spot_qty if sb.status == "OPEN" else 0.0
+    plan = run(sc)
+    for a in plan.actions:
+        if a.spot_qty is not None and a.kind != "ENTER":
+            assert a.spot_qty <= held + 1e-12, (a, held)
+    if foreign:
+        assert "ENTER" not in [a.kind for a in plan.actions]
+        assert any(x.startswith("FOREIGN_BALANCE") for x in plan.alerts)
