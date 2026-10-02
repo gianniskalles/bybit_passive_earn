@@ -128,7 +128,8 @@ def add(a: float, b: float) -> float:
 def limit_price(levels, qty: float) -> float:
     """The worst price needed to fill qty, walking the side of the book from
     the best level; the last level when the book is thinner (an IOC then
-    fills what is there)."""
+    fills what is there). Callers put it on the tick away from the book:
+    a buy rounds up, a sell down, so rounding never makes it miss."""
     if not levels:
         raise ValueError("empty side of the book")
     cum = 0.0
@@ -310,7 +311,8 @@ class _Run:
             return
         qty = floor_to(a.perp_qty, m.perp.qty_step)
         req = order_request("linear", sym, "Sell", "Limit", qty, m.perp.qty_step,
-                            self.link(i, "P", sym, 0), price=limit_price(bids, qty),
+                            self.link(i, "P", sym, 0),
+                            price=floor_to(limit_price(bids, qty), m.perp.tick_size),
                             tick=m.perp.tick_size)
         start = self.clock()
         out = self.submit(req, "ENTER", sym, "perp", start + self.timeout,
@@ -373,7 +375,7 @@ class _Run:
             if asks is None:
                 self.sleep(POLL_S)
                 continue
-            price = limit_price(asks, gross)
+            price = ceil_to(limit_price(asks, gross), m.spot.tick_size)  # a buy rounds up
             if m.spot.min_notional and gross * price < m.spot.min_notional:
                 gross = ceil_to(m.spot.min_notional / price, m.spot.qty_step)
             link = self.link(i, "S", sym, n)
@@ -436,7 +438,10 @@ class _Run:
                     self.alerts.append(f"CRITICAL: {a.kind} {sym} perp close incomplete")
                     self.escalate = ESCALATE
         if a.kind == "EXIT":
-            self.settle(sym, self.sb(sym))
+            sb = self.sb(sym)
+            if "perp" not in a.legs and pos is not None and pos.size == 0 and sb.perp_qty:
+                sb = replace(sb, perp_qty=0.0)              # liquidated/ADL'd: no short left
+            self.settle(sym, sb)
 
     def close_perp(self, i, sym, side, qty, m) -> Tuple[float, bool]:
         """reduceOnly Market: no price needed (decision 13.14). Retried until
@@ -487,7 +492,8 @@ class _Run:
                 req = order_request("spot", sym, "Sell", "Market", left, m.spot.qty_step, link)
             else:
                 req = order_request("spot", sym, "Sell", "Limit", left, m.spot.qty_step, link,
-                                    price=limit_price(bids, left), tick=m.spot.tick_size)
+                                    price=floor_to(limit_price(bids, left), m.spot.tick_size),
+                                    tick=m.spot.tick_size)
             out = self.submit(req, "SELL", sym, "spot", deadline, ref_price=ref)
             if out.state == "unknown":
                 self._journal(sym, f"Sell:{link}")

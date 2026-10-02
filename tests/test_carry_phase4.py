@@ -75,6 +75,15 @@ def test_order_requests():
             order_request(**kw)
 
 
+def test_limit_prices_round_away_from_the_book(clock):
+    """A price off the tick never makes a limit miss: buys round up, sells down."""
+    x = FakeExchange(clock, perp_bid=2500.004, spot_ask=2500.203)
+    run([enter()], x, clock)
+    assert x.created("linear:Sell")[0]["price"] == "2500"
+    assert x.created("spot:Buy")[0]["price"] == "2500.21"
+    assert x.short == pytest.approx(0.03) and hedged(x)
+
+
 def test_limit_price_walks_the_book():
     levels = [["100.0", "1"], ["99.5", "2"], ["99.0", "5"]]
     assert ex.limit_price(levels, 0.5) == 100.0

@@ -360,19 +360,19 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
             if cost > room:
                 no_entry[sym] += (f"capital: {cost:.2f} > room {room:.2f}",)
                 size = None
+        redeemed = False
         if sb.status == REDEEMING:
             enter = _redeem_step(sym, sb, d, bool(size), now, cfg, earn, alerts, actions, updates)
-            if enter and size is not None:
-                need = _required(size[2], open_notional, buffer)
-                if wallet_usdt - committed_usdt >= need:
-                    actions.append(Action("ENTER", sym, d.reason, legs=("perp", "spot"),
-                                          perp_qty=size[0], spot_qty=size[1], usdt=size[2]))
-                    committed_usdt += need
-                    open_notional += size[2]
-            continue
+            if not (enter and size is not None):
+                continue
+            redeemed = True
+            sb = updates.get(sym, sb)
         if size is None:
             continue
-        need = _required(size[2], open_notional, buffer)
+        # The entry needs the spot cost (+ the buffer for a first position);
+        # the slack is only added to what is redeemed, so that a price move
+        # between the redeem and the entry is already paid for.
+        need = _required(size[2], open_notional, buffer, slack=False)
         free = wallet_usdt - committed_usdt
         if free >= need:
             actions.append(Action("ENTER", sym, d.reason, legs=("perp", "spot"),
@@ -380,7 +380,10 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
             committed_usdt += need
             open_notional += size[2]
             continue
-        amount = _ceil_to(need - max(free, 0.0), 0.01)
+        if redeemed:
+            alerts.append(f"ENTRY_FUNDS_SHORT: {sym} redeem complete but {free:.2f} USDT < "
+                          f"{need:.2f} needed now; redeeming the difference")
+        amount = _ceil_to(_required(size[2], open_notional, buffer) - max(free, 0.0), 0.01)
         if earn is None or earn.staked < amount:
             no_entry[sym] += (f"not enough USDT in Earn ({earn.staked if earn else '?'} < {amount})",)
             continue
@@ -429,10 +432,12 @@ def _lost_book(sym: str, book: Mapping[str, SymbolBook], snap: Snapshot) -> bool
     return snap.account.balance(sym[:-len("USDT")]).wallet > dust
 
 
-def _required(cost: float, open_notional: float, buffer: float) -> float:
-    """USDT the UTA must hold for this entry: the spot cost plus slack, and
-    the buffer if it is the first position (the buffer is account-wide)."""
-    return cost * (1 + ENTRY_PRICE_SLACK) + (buffer if open_notional == 0 else 0.0)
+def _required(cost: float, open_notional: float, buffer: float, slack: bool = True) -> float:
+    """USDT the UTA must hold for this entry: the spot cost (plus the slack
+    when redeeming), and the buffer if it is the first position (the buffer
+    is account-wide)."""
+    return cost * (1 + (ENTRY_PRICE_SLACK if slack else 0.0)) + (buffer if open_notional == 0
+                                                                 else 0.0)
 
 
 def _entry_size(m, cfg: Mapping, fee: float) -> Optional[Tuple[float, float, float]]:

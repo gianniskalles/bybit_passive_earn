@@ -322,9 +322,41 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     μίας χρήσης, `carry/adopt.py`, `YIELD_CARRY_ADOPT_FILE`), που περνά στο book
     το min(short, spot) χωρίς trade. Κάθε εντολή καταγράφει `ref_price` και
     `slippage_bps`.
-- ⏳ **Φάσεις 5–6:** risk/ledger/paper με replay συνθετικών ανοδικών
-  καθεστώτων, κύκλος `run_carry_cycle.py`, units `yield-carry-*`. Testnet
-  μόνο με έγκριση του Giannis.
+- ✅ **Φάση 5 — κίνδυνος, ledger, paper, κύκλος:**
+  - `run_carry_cycle.py`: ο κύκλος (config → carry risk state → hold →
+    book → exchange → snapshot → plan → execute → ledger → R36 → εγγραφή
+    στο `LOG_DIR/<date>.jsonl` για το heartbeat → Telegram → dead-man ping).
+    Εγγραφή σε κάθε περίπτωση· `CYCLE_CRASH`/`CONFIG_INCOMPLETE` blocking.
+    Κλείδωμα αρχείου ενάντια σε ταυτόχρονους κύκλους.
+  - `carry/paper.py`: σε DRY_RUN πάντα paper λογαριασμός — πραγματικά
+    δεδομένα αγοράς, fills στο top του orderbook με τις χρεώσεις (spot buy
+    στο νόμισμα), funding των settlements που πέρασαν, τόκοι Earn. Ξεκινά με
+    όλο το `TOTAL_CAPITAL_CAP_USD` στο Earn (13.3).
+  - `carry/book.py`: υπογεγραμμένο book· χαμένο ή αλλοιωμένο → άδειο +
+    CRITICAL → `BOOK_MISMATCH` (13.15).
+  - `carry/ledger.py`: JSONL ανά ημέρα (`LOG_DIR/ledger/`): εντολές (fill,
+    τιμή αναφοράς, slippage, χρέωση), funding, αναμενόμενο funding, τόκοι,
+    round trips (basis/execution PnL).
+  - `carry/risk.py`: R36 (14 ημέρες funding κάτω από
+    `UNDERPERFORMANCE_RATIO` × αναμενόμενο), R33 dead-man ping, και το latch
+    `CARRY_HOLD` (blocking code): orphan protection, `BOOK_MISMATCH` ή R36
+    κρατούν `NO_NEW_POSITIONS` ως ότου ο operator γράψει το carry risk state.
+  - Replay tests (13.6) σε συνθετικά καθεστώτα με τον πραγματικό κύκλο:
+    ανοδικό (είσοδος, παραμονή, funding, έξοδος στο αρνητικό, USDT πίσω στο
+    Earn), ουδέτερο (καμία συναλλαγή), ανοδικό με τιμή +20% (ουδέτερο ως
+    προς την τιμή), ασταθές funding (≤ 2 είσοδοι ανά 30 ημέρες), ADL και
+    ρευστοποίηση (το ορφανό κλείνει στον ίδιο κύκλο), χαμένο book → adopt
+    → release.
+  - **Δύο σφάλματα που βρήκε το replay, διορθωμένα:** (1) το slack της
+    τιμής ζητούνταν και στην είσοδο, οπότε άνοδος τιμής μεταξύ redeem και
+    εισόδου έριχνε την είσοδο και γύριζε τα USDT στο Earn — επ' αόριστον·
+    (2) η τιμή limit στρογγυλοποιούνταν στο κοντινότερο tick, όχι μακριά από
+    το βιβλίο (αγορά πάνω, πώληση κάτω).
+  - **Ανεπιβεβαίωτο (§12):** στο live, το funding διαβάζεται από το
+    transaction log (`SETTLEMENT`, πεδίο `change`).
+- ⏳ **Φάση 6:** units `yield-carry-*`, βήματα στο `deploy.sh` (ποτέ μηδενισμός
+  του book όσο το exchange δείχνει θέσεις, 13.15), Telegram `/unwind carry`,
+  ημερήσια σύνοψη. Testnet μόνο με έγκριση του Giannis.
 
 ## 9. Ανοιχτά — τι μένει
 
