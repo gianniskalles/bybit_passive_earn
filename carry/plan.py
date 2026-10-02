@@ -5,8 +5,12 @@ Per symbol, in this order:
   1. Reconcile what Bybit shows with the book. The spot leg is the book's
      spot_qty (capped by the wallet), never the whole wallet: a balance beyond
      book + dust is FOREIGN_BALANCE — never traded, no entry for the symbol.
-     An untracked short is adopted without spot (UNTRACKED_POSITION), so it
-     is an orphan and closed; a long perp is never ours and is closed; an orphan
+     A short outside the book with spot in the wallet is a lost book
+     (BOOK_MISMATCH, decision 13.15): no order on either leg except closing
+     the part of the short beyond that spot, NO_NEW_POSITIONS, until
+     /adopt carry puts min(short, spot) in the book without a trade. A short
+     outside the book with no spot at all is an orphan and is closed
+     (UNTRACKED_POSITION); a long perp is never ours and is closed; an orphan
      leg (spot without short = liquidation/ADL, or short without spot) is
      closed in this cycle (ORPHAN_LEG); a short smaller than we left it is ADL
      (ADL_DETECTED) and the excess spot is sold (R13, R14).
@@ -91,6 +95,8 @@ class Plan:
     decisions: Mapping[str, Decision]
     book_updates: Mapping[str, SymbolBook]
     no_entry: Mapping[str, Tuple[str, ...]] = field(default_factory=lambda: MappingProxyType({}))
+    escalate: Optional[str] = None               # NO_NEW_POSITIONS on a BOOK_MISMATCH
+    adopted: Tuple[str, ...] = ()                # symbols put in the book by /adopt carry
 
 
 def _dec(x) -> Decimal:
@@ -117,7 +123,7 @@ def link_id(cycle_id: str, tag: str, symbol: str) -> str:
 
 
 def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str, SymbolBook],
-               cycle_id: str) -> Plan:
+               cycle_id: str, adopt: bool = False) -> Plan:
     now = snap.taken_ms
     params = to_params(cfg)
     alerts: List[str] = []
@@ -175,6 +181,14 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
 
     symbols = list(dict.fromkeys(list(cfg["SYMBOLS"]) +
                                  [s for s, b in book.items() if b.status != FLAT]))
+    # A short the book does not know, with spot in the wallet (decision
+    # 13.15): the book was lost, not the hedge. Closing the short would leave
+    # the spot naked, so nothing is traded until /adopt carry; the whole
+    # account takes no new exposure meanwhile.
+    mismatch = [] if adopt else [s for s in symbols if _lost_book(s, book, snap)]
+    if mismatch:
+        block.append(f"book mismatch {mismatch}")
+    adopted: List[str] = []
     open_notional = 0.0
     for sym in symbols:
         pos = snap.positions.get(sym)
@@ -209,9 +223,33 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
             continue
         short_qty = (pos.size if pos is not None else None)
         in_pos = sb.status == OPEN or bool(short_qty)
+        if sb.status != OPEN and short_qty and (sym in mismatch or (adopt and _lost_book(
+                sym, book, snap))):
+            spot_w = wallet_spot or 0.0
+            held_spot = min(short_qty, spot_w)
+            step = m.perp.qty_step if m is not None else None
+            excess = _floor_to(_diff(short_qty, held_spot), step) if step else 0.0
+            if adopt:
+                alerts.append(f"BOOK_ADOPTED: {sym} short {short_qty}, spot {held_spot} put in the "
+                              f"book by /adopt carry; no trade")
+                sb = replace(sb, status=OPEN, entered_ms=None, perp_qty=short_qty,
+                             spot_qty=held_spot, redeem_link=None, redeem_started_ms=None,
+                             redeem_amount=None)
+                updates[sym] = sb
+                adopted.append(sym)
+            else:
+                alerts.append(f"BOOK_MISMATCH: {sym} short {short_qty} not in the book with "
+                              f"{'an unreadable wallet' if wallet_spot is None else f'{spot_w} {base} in the wallet'}"
+                              f"; no order on either leg until /adopt carry")
+                no_entry[sym] = no_entry.get(sym, ()) + ("book mismatch",)
+            if excess > 0 and wallet_spot is not None:
+                actions.append(Action("REBALANCE_TOWARD_NEUTRAL", sym,
+                                      f"short {short_qty} beyond the wallet spot {spot_w}",
+                                      legs=("perp",), perp_qty=excess))
+            continue
         if sb.status != OPEN and short_qty:
-            # No spot is adopted: the book never held any, so no coin in the
-            # wallet can be proven ours. The naked short is then an orphan.
+            # Short outside the book and no spot at all: a naked short, an
+            # orphan, closed below.
             alerts.append(f"UNTRACKED_POSITION: {sym} short {short_qty} not in the book; adopted "
                           f"without spot")
             sb = replace(sb, status=OPEN, entered_ms=None, perp_qty=short_qty, spot_qty=0.0,
@@ -357,7 +395,7 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
     busy = any(a.kind != "EARN_RETURN" for a in actions)
     waiting = any(b.status == REDEEMING for b in final.values())
     if acct is not None and earn is not None and not busy and not waiting and not earn.unfinished \
-            and acct.balance("USDT").borrow == 0:
+            and acct.balance("USDT").borrow == 0 and not mismatch and not adopted:
         any_open = any(b.status == OPEN for b in final.values()) or any(
             p.size > 0 for p in snap.positions.values())
         keep = buffer if any_open else 0.0
@@ -373,7 +411,22 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
         else:
             alerts.append(f"CRITICAL: {a.kind} {a.symbol} planned in {state}; dropped")
     return Plan(tuple(permitted), tuple(alerts), MappingProxyType(decisions),
-                MappingProxyType(updates), MappingProxyType(no_entry))
+                MappingProxyType(updates), MappingProxyType(no_entry),
+                escalate="NO_NEW_POSITIONS" if mismatch else None, adopted=tuple(adopted))
+
+
+def _lost_book(sym: str, book: Mapping[str, SymbolBook], snap: Snapshot) -> bool:
+    """A short the book does not hold, next to spot in the wallet (or a
+    wallet that cannot be read, so the spot cannot be ruled out)."""
+    sb = book.get(sym, SymbolBook())
+    pos = snap.positions.get(sym)
+    if sb.status == OPEN or pos is None or pos.side != "Sell" or not pos.size:
+        return False
+    if snap.account is None:
+        return True
+    m = snap.markets.get(sym)
+    dust = m.spot.min_qty if m is not None else 0.0
+    return snap.account.balance(sym[:-len("USDT")]).wallet > dust
 
 
 def _required(cost: float, open_notional: float, buffer: float) -> float:

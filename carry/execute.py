@@ -210,8 +210,10 @@ class _Run:
         return link_id(self.cycle_id, f"{i}{tag}{n}", sym)
 
     # ---- one order ---------------------------------------------------------------------
-    def submit(self, req: Dict, action: str, sym: str, leg: str, deadline: float) -> Outcome:
+    def submit(self, req: Dict, action: str, sym: str, leg: str, deadline: float,
+               ref_price: Optional[float] = None) -> Outcome:
         body = req["body"]
+        rec = lambda out: self._record(action, sym, leg, body, out, ref_price)  # noqa: E731
         cat, link = body["category"], body["orderLinkId"]
         sent = False
         error = None
@@ -221,7 +223,7 @@ class _Run:
         except BybitAPIError as e:
             if e.ret_code is not None:                         # Bybit answered: not placed
                 out = Outcome("rejected", error=str(e), ret_code=e.ret_code)
-                self._record(action, sym, leg, body, out)
+                rec(out)
                 return out
             error = str(e)                                     # no answer: look it up (R23)
         while True:
@@ -233,7 +235,7 @@ class _Run:
                 error = str(e)
             if o is not None and o.get("orderStatus") in TERMINAL:
                 out = Outcome("done", float(o.get("cumExecQty") or 0.0), o)
-                self._record(action, sym, leg, body, out)
+                rec(out)
                 return out
             if o is None and readable and not sent:
                 try:                                           # never arrived: same link (R24)
@@ -244,23 +246,31 @@ class _Run:
                         sent = True
                     elif e.ret_code is not None:
                         out = Outcome("rejected", error=str(e), ret_code=e.ret_code)
-                        self._record(action, sym, leg, body, out)
+                        rec(out)
                         return out
                     else:
                         error = str(e)
             if self.clock() >= deadline:
                 out = Outcome("unknown", error=error)
-                self._record(action, sym, leg, body, out)
+                rec(out)
                 self.alerts.append(f"ORDER_UNKNOWN: {sym} {leg} {link} still unknown after "
                                    f"{self.timeout:.0f} s ({error})")
                 return out
             self.sleep(POLL_S)
 
-    def _record(self, action, sym, leg, body, out: Outcome) -> None:
+    def _record(self, action, sym, leg, body, out: Outcome, ref_price=None) -> None:
+        """One ledger row per order. slippage_bps: how much worse than the
+        reference price (the best level of the book it was priced from, or
+        the snapshot's when no book could be read) the fill was; > 0 = worse."""
         o = out.order or {}
+        avg = float(o.get("avgPrice") or 0.0)
+        slip = None
+        if ref_price and avg > 0:
+            sign = 1 if body.get("side") == "Sell" else -1
+            slip = round(sign * (ref_price - avg) / ref_price * 1e4, 4)
         self.orders.append({"ts_ms": self.now, "action": action, "symbol": sym, "leg": leg,
                             "request": dict(body), "outcome": out.state, "filled": out.filled,
-                            "avg_price": float(o.get("avgPrice") or 0.0),
+                            "avg_price": avg, "ref_price": ref_price, "slippage_bps": slip,
                             "fee": float(o.get("cumExecFee") or 0.0),
                             "fee_detail": o.get("cumFeeDetail"), "status": o.get("orderStatus"),
                             "error": out.error})
@@ -303,7 +313,8 @@ class _Run:
                             self.link(i, "P", sym, 0), price=limit_price(bids, qty),
                             tick=m.perp.tick_size)
         start = self.clock()
-        out = self.submit(req, "ENTER", sym, "perp", start + self.timeout)
+        out = self.submit(req, "ENTER", sym, "perp", start + self.timeout,
+                          ref_price=float(bids[0][0]))
         if out.state == "rejected":
             self.alerts.append(f"ENTRY_ABORTED: {sym} perp order rejected: {out.error}")
             return
@@ -369,7 +380,7 @@ class _Run:
             n += 1
             out = self.submit(order_request("spot", sym, "Buy", "Limit", gross, m.spot.qty_step,
                                             link, price=price, tick=m.spot.tick_size),
-                              "ENTER", sym, "spot", deadline)
+                              "ENTER", sym, "spot", deadline, ref_price=float(asks[0][0]))
             if out.state == "unknown":
                 return received, [f"Buy:{link}"]
             if out.state == "rejected":
@@ -438,7 +449,8 @@ class _Run:
             req = order_request("linear", sym, side, "Market", sub(qty, closed), m.perp.qty_step,
                                 self.link(i, "C", sym, n), reduce_only=True)
             n += 1
-            out = self.submit(req, "CLOSE", sym, "perp", deadline)
+            ref = m.perp_ask if side == "Buy" else m.perp_bid    # the snapshot: no fresh read
+            out = self.submit(req, "CLOSE", sym, "perp", deadline, ref_price=ref)
             if out.state == "unknown":
                 return closed, False
             if out.state == "rejected":
@@ -460,10 +472,13 @@ class _Run:
         if qty < m.spot.min_qty:
             return 0.0
         sold, n = 0.0, 0
+        ref = m.spot_bid                                        # the snapshot until a book is read
         deadline = self.clock() + self.timeout
         while sub(qty, sold) >= m.spot.min_qty and self.clock() < deadline:
             left = sub(qty, sold)
             bids = self.book_side("spot", sym, "Sell")
+            if bids is not None:
+                ref = float(bids[0][0])
             link = self.link(i, "X", sym, n)
             n += 1
             if bids is None:
@@ -473,7 +488,7 @@ class _Run:
             else:
                 req = order_request("spot", sym, "Sell", "Limit", left, m.spot.qty_step, link,
                                     price=limit_price(bids, left), tick=m.spot.tick_size)
-            out = self.submit(req, "SELL", sym, "spot", deadline)
+            out = self.submit(req, "SELL", sym, "spot", deadline, ref_price=ref)
             if out.state == "unknown":
                 self._journal(sym, f"Sell:{link}")
                 return sold
@@ -491,7 +506,7 @@ class _Run:
             link = self.link(i, "X", sym, n)
             out = self.submit(order_request("spot", sym, "Sell", "Market", left, m.spot.qty_step,
                                             link), "SELL", sym, "spot",
-                              self.clock() + self.timeout)
+                              self.clock() + self.timeout, ref_price=ref)
             if out.state == "unknown":
                 self._journal(sym, f"Sell:{link}")
             else:

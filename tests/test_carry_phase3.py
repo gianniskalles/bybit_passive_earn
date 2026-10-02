@@ -287,18 +287,87 @@ def test_collateral_ratio_drop_blocks_entry():
     assert "ENTER" not in kinds(plan) and any(a.startswith("CVR_DROP") for a in plan.alerts)
 
 
-def test_untracked_short_is_adopted_and_reported():
-    """The short is adopted, but no spot is: the book never held any, so the
-    wallet's ETH cannot be proven ours. The naked short is closed reduceOnly;
-    the ETH stays untouched as a foreign balance."""
-    snap = open_snap()
+def test_short_without_any_spot_is_adopted_and_closed():
+    """Short outside the book and no spot at all: a naked short, closed."""
+    snap = open_snap(acct=account(usdt=16.0, coins={}))
     plan = cp.plan_cycle(snap, cfg(), "NORMAL", {}, "c")
     assert any(a.startswith("UNTRACKED_POSITION") for a in plan.alerts)
-    assert plan.book_updates["ETHUSDT"].status == "OPEN" and "ENTER" not in kinds(plan)
-    assert plan.book_updates["ETHUSDT"].spot_qty == 0
     e = only(plan, "EXIT")
     assert e.legs == ("perp",) and e.perp_qty is None
-    assert any(a.startswith("FOREIGN_BALANCE") for a in plan.alerts)
+
+
+# --- lost book (decision 13.15) ------------------------------------------------------ #
+
+def test_lost_book_with_a_healthy_position_does_nothing_and_escalates():
+    """Empty book, short 0.03 and 0.03 ETH: closing the short would leave the
+    ETH naked. BOOK_MISMATCH, zero orders on either leg, NO_NEW_POSITIONS."""
+    plan = cp.plan_cycle(open_snap(), cfg(), "NORMAL", {}, "c")
+    assert plan.actions == ()
+    assert any(a.startswith("BOOK_MISMATCH: ETHUSDT") for a in plan.alerts)
+    assert not any(a.startswith("FOREIGN_BALANCE") for a in plan.alerts)
+    assert plan.escalate == "NO_NEW_POSITIONS"
+    b = plan.book_updates.get("ETHUSDT", SymbolBook())
+    assert b.status == "FLAT" and b.perp_qty == 0 and b.spot_qty == 0
+
+
+def test_lost_book_blocks_entries_on_every_symbol():
+    c = cfg(SYMBOLS=["ETHUSDT", "BTCUSDT"], MAX_NOTIONAL_PER_SYMBOL_USD=42.5)
+    snap = snapshot(markets={"ETHUSDT": market(), "BTCUSDT": market("BTCUSDT", price=2500.0)},
+                    positions={"ETHUSDT": short(size=0.03), "BTCUSDT": short("BTCUSDT")},
+                    acct=account(usdt=500.0, coins={"ETH": 0.03}))
+    plan = cp.plan_cycle(snap, c, "NORMAL", {}, "c")
+    assert not [a for a in plan.actions if a.kind in ("ENTER", "EARN_REDEEM_FOR_ENTRY")]
+
+
+def test_lost_book_closes_only_the_short_beyond_the_wallet_spot():
+    snap = open_snap(positions={"ETHUSDT": short(size=0.05)})            # 0.03 ETH in the wallet
+    plan = cp.plan_cycle(snap, cfg(), "NORMAL", {}, "c")
+    r = only(plan, "REBALANCE_TOWARD_NEUTRAL")
+    assert r.legs == ("perp",) and r.perp_qty == pytest.approx(0.02)
+    assert kinds(plan) == ["REBALANCE_TOWARD_NEUTRAL"]
+    assert any(a.startswith("BOOK_MISMATCH") for a in plan.alerts)
+
+
+def test_lost_book_with_an_unreadable_wallet_does_nothing():
+    snap = snapshot(positions={"ETHUSDT": short(size=0.03)}, acct=None)
+    plan = cp.plan_cycle(snap, cfg(), "UNWIND", {}, "c")
+    assert plan.actions == () and any(a.startswith("BOOK_MISMATCH") for a in plan.alerts)
+
+
+def test_adopt_puts_the_position_in_the_book_without_a_trade():
+    """/adopt carry: min(short, spot) into the book, no order."""
+    plan = cp.plan_cycle(open_snap(), cfg(), "NORMAL", {}, "c", adopt=True)
+    assert plan.actions == ()
+    b = plan.book_updates["ETHUSDT"]
+    assert b.status == "OPEN" and b.perp_qty == pytest.approx(0.03)
+    assert b.spot_qty == pytest.approx(0.03)
+    assert plan.adopted == ("ETHUSDT",) and plan.escalate is None
+    assert any(a.startswith("BOOK_ADOPTED: ETHUSDT") for a in plan.alerts)
+    # the next cycle sees an ordinary, neutral open position
+    nxt = cp.plan_cycle(open_snap(), cfg(), "NORMAL", {"ETHUSDT": b}, "c2")
+    assert not [a for a in nxt.actions if a.symbol == "ETHUSDT"]
+    assert not any(a.startswith("BOOK_MISMATCH") for a in nxt.alerts)
+
+
+def test_adopt_takes_the_smaller_leg_and_closes_the_excess_short():
+    snap = open_snap(positions={"ETHUSDT": short(size=0.05)})
+    plan = cp.plan_cycle(snap, cfg(), "NORMAL", {}, "c", adopt=True)
+    b = plan.book_updates["ETHUSDT"]
+    assert b.spot_qty == pytest.approx(0.03) and b.perp_qty == pytest.approx(0.05)
+    r = only(plan, "REBALANCE_TOWARD_NEUTRAL")
+    assert r.legs == ("perp",) and r.perp_qty == pytest.approx(0.02)
+
+
+def test_adopt_with_more_spot_than_short_leaves_the_rest_foreign():
+    snap = open_snap(acct=account(usdt=16.0, coins={"ETH": 0.53}))
+    plan = cp.plan_cycle(snap, cfg(), "NORMAL", {}, "c", adopt=True)
+    assert plan.book_updates["ETHUSDT"].spot_qty == pytest.approx(0.03)
+    assert plan.actions == ()
+
+
+def test_adopt_without_a_mismatch_adopts_nothing():
+    plan = cp.plan_cycle(snapshot(acct=account(usdt=100.0)), cfg(), "NORMAL", {}, "c", adopt=True)
+    assert plan.adopted == ()
 
 
 # --- foreign coins: the spot leg is the book's quantity, never the wallet's ------------- #

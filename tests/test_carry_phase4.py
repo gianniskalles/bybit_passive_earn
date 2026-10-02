@@ -271,6 +271,25 @@ def test_exit_spot_unfilled_limit_falls_back_to_market_with_an_alert(clock):
     assert any(a.startswith("SPOT_MARKET_SELL") for a in r.alerts)
 
 
+def test_market_sells_record_their_slippage(clock):
+    """Decision 13.15: a Market sell (no book, or after LEG_TIMEOUT_S) is
+    allowed, and its slippage against the reference price is recorded."""
+    x = open_exchange(clock).script("book:spot", "error")
+    r = run([exit_()], x, clock, book={"ETHUSDT": OPEN}, snap=open_snapshot())
+    [sell] = [o for o in r.orders if o["leg"] == "spot"]
+    assert sell["request"]["orderType"] == "Market"
+    ref = open_snapshot().markets["ETHUSDT"].spot_bid                 # no book: the snapshot
+    assert sell["ref_price"] == pytest.approx(ref)
+    assert sell["slippage_bps"] == pytest.approx((ref - 2499.8) / ref * 1e4, abs=1e-3)
+    y = open_exchange(clock)
+    y.limit_fills = False
+    r = run([exit_()], y, clock, book={"ETHUSDT": OPEN}, snap=open_snapshot())
+    market = [o for o in r.orders if o["leg"] == "spot" and o["request"]["orderType"] == "Market"]
+    assert market and market[-1]["ref_price"] == pytest.approx(2499.8)   # last book read
+    assert market[-1]["slippage_bps"] == pytest.approx(0.0)
+    assert all("slippage_bps" in o for o in r.orders)
+
+
 def test_margin_emergency_exit_closes_perp_first(clock):
     x = open_exchange(clock)
     run([exit_(legs=("perp", "spot"))], x, clock, book={"ETHUSDT": OPEN}, snap=open_snapshot())

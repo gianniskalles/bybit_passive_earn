@@ -471,3 +471,15 @@ DEADMAN_URL: null                # εξωτερικός έλεγχος ζωής 
     **Για τη Φάση 4:** οι έξοδοι δεν εξαρτώνται από φρέσκια τιμή. Το perp
     κλείνει με reduceOnly Market. Το spot πουλιέται με όριο τιμής από orderbook
     που διαβάζεται τη στιγμή της εκτέλεσης· αν δεν διαβαστεί, Market με alert.
+15. **2/10 — Φάση 4 εγκρίνεται· χαμένο book.** Η Market πώληση spot μετά το
+    `LEG_TIMEOUT_S` εγκρίνεται, με το slippage στο record (`ref_price`,
+    `slippage_bps` σε κάθε εντολή). Χαμένο book: short εκτός book **και** spot στο
+    wallet → `BOOK_MISMATCH` (blocking code), καμία ενέργεια σε κανένα σκέλος,
+    `NO_NEW_POSITIONS` (κανένα Earn move σε αυτόν τον κύκλο). Το μέρος του short
+    πέρα από το spot του wallet κλείνει με reduceOnly. Short χωρίς καθόλου spot →
+    κλείνει, όπως πριν. Ανάκτηση μόνο με Telegram `/adopt carry` + `/confirm
+    <κωδικός μίας χρήσης>`: γράφεται υπογεγραμμένη (HMAC) αίτηση μίας χρήσης
+    (λήξη 30'), και ο επόμενος κύκλος περνά στο book το min(short, spot) χωρίς
+    καμία συναλλαγή. **Για τη Φάση 6:** το `deploy.sh` ποτέ δεν μηδενίζει το book
+    του carry όσο το exchange δείχνει θέσεις.
+

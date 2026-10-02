@@ -112,7 +112,11 @@ def test_never_above_the_limits(sc):
 def test_unwind_with_a_position_always_exits(sc):
     state, _, book, _, short_qty, *_ = sc
     if state == "UNWIND" and short_qty > 0:
-        assert any(a.kind == "EXIT" for a in run(sc).actions)
+        plan = run(sc)
+        # a lost book (decision 13.15) is the one exception: no order on
+        # either leg, only the short beyond the wallet spot is reduced
+        if not any(a.startswith("BOOK_MISMATCH") for a in plan.alerts):
+            assert any(a.kind == "EXIT" for a in plan.actions)
 
 
 @SETTINGS
@@ -156,4 +160,16 @@ def test_foreign_coins_are_never_traded(sc):
             assert a.spot_qty <= held + 1e-12, (a, held)
     if foreign:
         assert "ENTER" not in [a.kind for a in plan.actions]
-        assert any(x.startswith("FOREIGN_BALANCE") for x in plan.alerts)
+        assert any(x.startswith(("FOREIGN_BALANCE", "BOOK_MISMATCH")) for x in plan.alerts)
+
+
+@SETTINGS
+@given(scenario())
+def test_lost_book_never_trades_the_spot_and_never_adds_short(sc):
+    """Decision 13.15: with a BOOK_MISMATCH the only order is a reduceOnly
+    cut of the short beyond the wallet spot."""
+    plan = run(sc)
+    if any(x.startswith("BOOK_MISMATCH") for x in plan.alerts):
+        assert plan.escalate == "NO_NEW_POSITIONS"
+        for a in plan.actions:
+            assert a.kind == "REBALANCE_TOWARD_NEUTRAL" and a.legs == ("perp",), a

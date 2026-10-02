@@ -17,6 +17,7 @@ Path overrides (all optional; defaults match the VPS layout):
   YIELD_NOTIFY_STATE     $YIELD_HERMES_HOME/state/notify_state.json (Telegram dedup)
   YIELD_CARRY_CONFIG_FILE  <repo>/config/carry.yaml
   YIELD_CARRY_STATE_FILE   $YIELD_HERMES_HOME/state/carry_risk_state.json
+  YIELD_CARRY_ADOPT_FILE   $YIELD_HERMES_HOME/state/carry_adopt_request.json
 
 Env precedence (load_env):
   process env  >  profile .env  >  shared .env (TELEGRAM_BOT_TOKEN only)
@@ -80,6 +81,10 @@ def carry_config_file() -> Path:
 
 def carry_risk_state_file() -> Path:
     return _path("YIELD_CARRY_STATE_FILE", hermes_home() / "state" / "carry_risk_state.json")
+
+
+def carry_adopt_file() -> Path:
+    return _path("YIELD_CARRY_ADOPT_FILE", hermes_home() / "state" / "carry_adopt_request.json")
 
 
 def notify_state_file() -> Path:

@@ -355,7 +355,7 @@ def test_carry_blocking_codes_are_exact():
     assert set(heartbeat.SYSTEMS["carry"].blocking_codes) == {
         "CONFIG_INCOMPLETE", "CRITICAL", "CYCLE_CRASH", "ORPHAN_LEG", "ADL_DETECTED",
         "LIQUIDATION_DETECTED", "MARGIN_EMERGENCY", "FOREIGN_ACTIVITY", "REGION_RESTRICTED",
-        "EARN_REDEEM_STUCK", "UNTRACKED_POSITION", "USDT_BORROW_LIMIT"}
+        "EARN_REDEEM_STUCK", "UNTRACKED_POSITION", "USDT_BORROW_LIMIT", "BOOK_MISMATCH"}
     assert heartbeat.SYSTEMS["yield"].blocking_codes == heartbeat.BLOCKING_CODES
 
 

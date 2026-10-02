@@ -316,6 +316,12 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     (χωρίς αυτό η χρέωση θεωρείται στο νόμισμα, alert
     `FEE_CURRENCY_ASSUMED`)· retCode 110017 (reduceOnly με μηδενική θέση)·
     110072 (διπλό `orderLinkId`).
+  - **Εγκρίθηκε 2/10 (13.15).** Διόρθωση: χαμένο book → `BOOK_MISMATCH`,
+    καμία εντολή (εκτός από reduceOnly του short πέρα από το spot του wallet),
+    `NO_NEW_POSITIONS`· ανάκτηση με Telegram `/adopt carry` (υπογεγραμμένη αίτηση
+    μίας χρήσης, `carry/adopt.py`, `YIELD_CARRY_ADOPT_FILE`), που περνά στο book
+    το min(short, spot) χωρίς trade. Κάθε εντολή καταγράφει `ref_price` και
+    `slippage_bps`.
 - ⏳ **Φάσεις 5–6:** risk/ledger/paper με replay συνθετικών ανοδικών
   καθεστώτων, κύκλος `run_carry_cycle.py`, units `yield-carry-*`. Testnet
   μόνο με έγκριση του Giannis.

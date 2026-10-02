@@ -61,6 +61,7 @@ class FakeExchange:
         self.books = {"linear": ([[perp_bid, depth]], [[perp_ask, depth]]),
                       "spot": ([[spot_bid, depth]], [[spot_ask, depth]])}
         self.fee_detail = fee_detail
+        self.limit_fills = True            # False: a book that never meets a limit price
         self.latency = latency
         self.orders: Dict[str, Dict] = {}
         self.calls: List[tuple] = []
@@ -108,6 +109,8 @@ class FakeExchange:
         step = Decimal(str(self.steps[cat]))
         want = float((Decimal(b["qty"]) * Decimal(str(frac)) / step).to_integral_value(
             rounding=ROUND_FLOOR) * step)
+        if b["orderType"] == "Limit" and not self.limit_fills:
+            want = 0.0
         if b["orderType"] == "Limit":
             price = float(b["price"])
             if side == "Sell" and price > bids[0][0]:

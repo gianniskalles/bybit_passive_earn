@@ -4,7 +4,9 @@
   /status          current risk_state (verified)
   /unwind          ask to set UNWIND   -> reply with a one-time code
   /resume          ask to set NORMAL   -> reply with a one-time code
-  /confirm <code>  second message: writes the state with source=operator
+  /adopt carry     ask to adopt a lost carry book (decision 13.15) -> one-time code
+  /confirm <code>  second message: writes the state with source=operator, or
+                   the signed single-use carry adopt request
   /cancel          drop the pending request
 
 Only messages whose chat.id AND from.id equal the configured
@@ -32,11 +34,12 @@ import yaml
 
 import risk_state
 import settings
+from carry import adopt
 from notify import chat_id as configured_chat_id
 
 CONFIRM_TTL_S = 120
 TARGETS = {"/unwind": "UNWIND", "/resume": "NORMAL"}
-HELP = "Commands: /status, /unwind, /resume, /confirm <code>, /cancel"
+HELP = "Commands: /status, /unwind, /resume, /adopt carry, /confirm <code>, /cancel"
 
 
 class CommandBot:
@@ -44,12 +47,14 @@ class CommandBot:
                  write_state: Callable[[str, str], None],
                  read_status: Callable[[], str],
                  clock: Callable[[], float] = time.time,
-                 new_code: Callable[[], str] = lambda: f"{secrets.randbelow(10**6):06d}"):
+                 new_code: Callable[[], str] = lambda: f"{secrets.randbelow(10**6):06d}",
+                 request_adopt: Optional[Callable[[str], None]] = None):
         self.allowed = str(allowed_chat_id)
         self.write_state = write_state
         self.read_status = read_status
         self.clock = clock
         self.new_code = new_code
+        self.request_adopt = request_adopt
         self.pending: Optional[Dict[str, object]] = None
 
     def handle(self, update: Dict) -> Optional[Tuple[str, str]]:
@@ -75,6 +80,11 @@ class CommandBot:
                             "expires": self.clock() + CONFIRM_TTL_S}
             return chat, (f"Set risk state to {TARGETS[cmd]}? Reply /confirm {code} within "
                           f"{CONFIRM_TTL_S // 60} min, or /cancel.")
+        if cmd == "/adopt" and words[1:] == ["carry"] and self.request_adopt is not None:
+            code = self.new_code()
+            self.pending = {"adopt": True, "code": code, "expires": self.clock() + CONFIRM_TTL_S}
+            return chat, (f"Adopt the carry position into the book (min(short, spot), no trade)? "
+                          f"Reply /confirm {code} within {CONFIRM_TTL_S // 60} min, or /cancel.")
         if cmd == "/cancel":
             self.pending = None
             return chat, "Cancelled."
@@ -86,6 +96,13 @@ class CommandBot:
                 return chat, "Confirmation expired. Send the command again."
             if len(words) != 2 or not secrets.compare_digest(words[1], str(pending["code"])):
                 return chat, "Wrong code. Send the command again."
+            if pending.get("adopt"):
+                try:
+                    self.request_adopt(f"telegram chat {chat}")
+                except Exception as e:
+                    return chat, f"❌ Could not write the adopt request: {e}"
+                return chat, ("✅ Carry adopt requested: the next carry cycle puts min(short, spot) "
+                              "in the book, without a trade.")
             state = str(pending["state"])
             try:
                 self.write_state(state, f"telegram operator command (chat {chat})")
@@ -129,7 +146,10 @@ def main() -> int:
         age = f"{v.age_ms // 60000} min" if v.age_ms is not None else "?"
         return f"risk_state: {v.state or '-'} ({v.code}, source={v.source}, age {age})"
 
-    bot = CommandBot(allowed, write_state, read_status)
+    def request_adopt(who: str) -> None:
+        adopt.write_request(settings.carry_adopt_file(), key, who, int(time.time() * 1000))
+
+    bot = CommandBot(allowed, write_state, read_status, request_adopt=request_adopt)
     # Discard anything queued while the bot was down.
     backlog = _api(token, "getUpdates", {"offset": -1, "timeout": 0}).get("result", [])
     offset = backlog[-1]["update_id"] + 1 if backlog else 0
