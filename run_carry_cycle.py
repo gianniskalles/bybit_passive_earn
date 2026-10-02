@@ -320,16 +320,22 @@ def main() -> int:
     from carry.client import CarryClient
     from notify import Notifier
     env = settings.load_env()
+    testnet = settings.testnet()
     cfg, error = None, None
     try:
-        cfg = cc.load(settings.carry_config_file(),
-                      testnet=env.get("BYBIT_TESTNET", "").lower() in ("1", "true", "yes"))
+        cfg = cc.load(settings.carry_config_file(), testnet=testnet)
     except cc.CarryConfigError as e:
         error = str(e)
+    if testnet and cfg is not None and cfg.get("TESTNET_ONLY") is not True:
+        # A testnet run with a mainnet config would write the mainnet LOG_DIR
+        # (cycle records the mainnet heartbeat reads, ledger).
+        cfg, error = None, (f"{settings.carry_config_file()}: BYBIT_TESTNET is set but the config "
+                            f"is not TESTNET_ONLY; testnet runs use config/carry.testnet.yaml")
     # Its own key, for its own subaccount (CARRY_PLAN §3.6, 0A). Never the
     # yield rotation's BYBIT_API_KEY: two systems never share an account.
-    client = CarryClient(api_key=env.get(CARRY_KEY), api_secret=env.get(CARRY_SECRET))
-    lock_path = settings.hermes_home() / "state" / "carry_cycle.lock"
+    client = CarryClient(api_key=env.get(CARRY_KEY), api_secret=env.get(CARRY_SECRET),
+                         testnet=testnet)
+    lock_path = settings.carry_cycle_file().with_name("carry_cycle.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as lock:
         try:

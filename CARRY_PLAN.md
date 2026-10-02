@@ -496,4 +496,12 @@ DEADMAN_URL: null                # εξωτερικός έλεγχος ζωής 
     `ENTRY_MIN_EXPECTED_APR` **πάνω από** το APR του Earn. `DEADMAN_URL`
     υποχρεωτικό μόνο όταν `DRY_RUN: false` (13.9: κενό ως πριν το live· το
     paper trading ξεκινά χωρίς αυτό).
+17. **2/10 — Φάση 6 εγκρίνεται**, και το `DEADMAN_URL` υποχρεωτικό μόνο με
+    `DRY_RUN: false`. Το PR #2 έγινε merge στο `main` (merge commit). **Πριν
+    το testnet:** τα αρχεία state του testnet χωριστά από του mainnet.
+    *Υλοποίηση:* με `BYBIT_TESTNET` (ο ίδιος διακόπτης με του client) όλα τα
+    αρχεία state του carry (risk state, book, paper, hold, adopt, cycle, lock)
+    είναι στο `state/carry-testnet/`, και το default config είναι το
+    `carry.testnet.yaml` (δικό του `LOG_DIR`). Κύκλος testnet με config που δεν
+    είναι `TESTNET_ONLY` → `CONFIG_INCOMPLETE`. Τα paths του mainnet δεν αλλάζουν.
 

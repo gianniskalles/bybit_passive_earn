@@ -204,7 +204,10 @@ tail -n 1 /opt/hermes/logs/carry/$(date -u +%F).jsonl | $PY -m json.tool | head 
 σύμβολο, π.χ. `ETH: 2,6% — χρειάζεται 6,7% (5% πάνω από το Earn 1,7%)`.
 
 **Μετά το deploy:** 14 ημέρες paper trading (CARRY_PLAN §10). Testnet μόνο με
-έγκριση του Giannis.
+έγκριση του Giannis. Με `BYBIT_TESTNET=1` το carry γράφει μόνο στο
+`/opt/hermes/state/carry-testnet/` και στο `/opt/hermes/logs/carry-testnet`
+(config `carry.testnet.yaml`)· τα αρχεία του mainnet δεν τα αγγίζει, και με
+το config του mainnet αρνείται να τρέξει.
 
 ## Carry — τι κάνει ο Giannis στο Bybit UI (και πουθενά αλλού)
 

@@ -382,6 +382,10 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     `RISK_STATE_*` χωρίς διπλό πρόθεμα.
   - Λίστα για τον Giannis στο Bybit UI: `DEPLOY.md`, «Carry — τι κάνει ο
     Giannis στο Bybit UI».
+  - **Εγκρίθηκε 2/10· merge στο `main`.** Πριν το testnet: με `BYBIT_TESTNET`
+    όλα τα αρχεία state του carry στο `state/carry-testnet/` και config το
+    `carry.testnet.yaml` (δικό του `LOG_DIR`)· testnet με config που δεν είναι
+    `TESTNET_ONLY` → `CONFIG_INCOMPLETE`.
   - Testnet μόνο με έγκριση του Giannis.
 
 ## 9. Ανοιχτά — τι μένει
