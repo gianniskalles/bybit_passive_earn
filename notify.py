@@ -44,8 +44,20 @@ def send_telegram(bot_token: str, chat_id: str, text: str) -> bool:
         return False
 
 
+def _operator_chat() -> Optional[str]:
+    """The one operator chat, from config/yield_rotation.yaml. The carry's
+    config has no chat of its own: its alerts go to the same operator."""
+    try:
+        import yaml
+        cfg = yaml.safe_load(settings.config_file().read_text())
+        return cfg.get("ALERT_TELEGRAM_CHAT_ID") if isinstance(cfg, dict) else None
+    except Exception:
+        return None
+
+
 def chat_id(env: Dict[str, str], cfg: Optional[dict] = None) -> Optional[str]:
-    value = env.get("ALERT_TELEGRAM_CHAT_ID") or (cfg or {}).get("ALERT_TELEGRAM_CHAT_ID")
+    value = (env.get("ALERT_TELEGRAM_CHAT_ID") or (cfg or {}).get("ALERT_TELEGRAM_CHAT_ID")
+             or _operator_chat())
     return str(value) if value not in (None, "") else None
 
 

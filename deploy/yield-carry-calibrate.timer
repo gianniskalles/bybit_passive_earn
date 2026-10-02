@@ -1,0 +1,9 @@
+[Unit]
+Description=Funding carry — monthly measurement, 1st of the month 07:10 UTC
+
+[Timer]
+OnCalendar=*-*-01 07:10:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

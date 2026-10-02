@@ -152,3 +152,90 @@ systemctl disable --now yield-cycle.timer yield-heartbeat.timer yield-summary.ti
 
 Τα backup του `.env` είναι στο `/opt/hermes/.env.bak.*` και το παλιό risk
 state στο `/opt/hermes/state/risk_state.json.pre-v6.*`.
+
+---
+
+## Carry (CARRY_PLAN, Φάση 6) — αντικαθιστά το yield rotation
+
+**Ένα σύστημα τη φορά, ποτέ και τα δύο στον ίδιο λογαριασμό** (CARRY_PLAN §13.2).
+
+```bash
+cd /opt/hermes/yield_rotation && sudo -u hermes git pull --ff-only origin main
+sudo deploy/deploy.sh --system carry     # το carry: σβήνει τους timers του yield rotation
+sudo deploy/deploy.sh                    # ξανά, αργότερα: κρατά το σύστημα που τρέχει
+sudo deploy/deploy.sh --system yield     # πίσω στο yield rotation (μόνο αν το carry δεν κρατά τίποτα)
+```
+
+Ίδια 7 βήματα, ίδιο log, ίδιοι κανόνες (`yield-*` μόνο, ποτέ crontab, ποτέ
+testnet, ποτέ `DRY_RUN: false`). Με `--system carry`:
+
+| Βήμα | Διαφορά |
+|---|---|
+| 2 | Χωρίς έλεγχο του `hermes chat` (το carry δεν έχει LLM) |
+| 3 | `keys --system carry`: δικό του κλειδί `BYBIT_CARRY_API_KEY` / `BYBIT_CARRY_API_SECRET` (subaccount μόνο για το carry· προαιρετικό όσο `DRY_RUN: true`, γιατί το paper διαβάζει μόνο δημόσια δεδομένα· **ποτέ** ίδιο με το `BYBIT_API_KEY` του yield rotation) |
+| 5 | `config/carry.yaml` με `DRY_RUN: true` → carry risk state (άκυρο → στην άκρη) → **book**: άκυρο μετακινείται **μόνο** αν το carry δεν κρατά τίποτα, αλλιώς FAIL → heartbeat `--system carry` → ένας κύκλος (paper) → heartbeat → `NORMAL` |
+| 6 | Δεν υπάρχει LLM regression (δεν υπάρχει prompt) |
+| 7 | `install.sh --system carry`: **πρώτα** σβήνει `yield-cycle/heartbeat/summary.timer`, μετά ανοίγει `yield-carry-cycle` (5'), `yield-carry-heartbeat` (5', offset), `yield-carry-summary` (06:50 UTC), `yield-carry-calibrate` (1η του μήνα, 07:10 UTC). FAIL αν μείνει ενεργός έστω ένας timer του άλλου συστήματος |
+
+**Δικλείδες για το book και το κλειδί HMAC.** Το book του carry είναι
+υπογεγραμμένο με το `HERMES_RISK_HMAC_KEY`· νέο κλειδί = `BOOK_UNREADABLE` →
+`BOOK_MISMATCH` → κράτημα. Γι' αυτό, όσο το carry κρατά οτιδήποτε (θέση στο
+exchange, spot πάνω από dust, paper θέση, μη κενό book) **ή δεν μπορεί να
+διαβαστεί**:
+- το βήμα 3 **δεν** αλλάζει το κλειδί HMAC (FAIL, δεν γράφει τίποτα· επαναφέρεις
+  το παλιό κλειδί)·
+- το βήμα 5 **δεν** μετακινεί το book (FAIL· ανάκτηση με Telegram `/adopt carry`)·
+- η επιστροφή στο yield rotation αρνείται στο βήμα 1, πριν από οτιδήποτε.
+
+Έλεγχος με το χέρι: `sudo -u hermes $PY $REPO/deploy/preflight.py carry-exposure`
+(0 = δεν κρατά τίποτα).
+
+```bash
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
+systemctl list-timers 'yield-*' --no-pager
+sudo -u hermes $PY $REPO/deploy/preflight.py carry-exposure
+sudo -u hermes $PY $REPO/risk_state.py --system carry verify   # code OK, state NORMAL
+tail -n 1 /opt/hermes/logs/carry/$(date -u +%F).jsonl | $PY -m json.tool | head -n 80
+```
+
+**Telegram:** `/status` (και τα δύο συστήματα + κράτημα), `/unwind carry`,
+`/resume carry` (λύνει και το `CARRY_HOLD`), `/unwind all`, `/adopt carry` —
+όλα με `/confirm <κωδικός>`. Η ημερήσια σύνοψη του carry έχει μία γραμμή ανά
+σύμβολο, π.χ. `ETH: 2,6% — χρειάζεται 6,7% (5% πάνω από το Earn 1,7%)`.
+
+**Μετά το deploy:** 14 ημέρες paper trading (CARRY_PLAN §10). Testnet μόνο με
+έγκριση του Giannis.
+
+## Carry — τι κάνει ο Giannis στο Bybit UI (και πουθενά αλλού)
+
+Τα παρακάτω δεν γίνονται από το API ή από τον Hermes. Σειρά:
+
+1. **Subaccount μόνο για το carry.** Κεντρικός λογαριασμός → Subaccounts →
+   Create. Τύπος **Unified Trading Account**. Κανένα άλλο bot ή χειροκίνητη
+   συναλλαγή εκεί, ποτέ.
+2. **Earn στο subaccount.** Μέσα στο subaccount: Earn → Easy Earn → USDT
+   Flexible. Έλεγξε ότι επιτρέπεται εγγραφή. Αν όχι, σταμάτα και πες το: το
+   στρώμα A θέλει άλλο σχέδιο.
+3. **Cross Margin.** Στο subaccount: Unified Trading Account → Margin Mode →
+   **Cross Margin** (όχι Isolated, όχι Portfolio).
+4. **One-Way για το ETHUSDT perpetual.** Derivatives → USDT Perpetual →
+   ρυθμίσεις → Position Mode → **One-Way Mode**. Ο κώδικας αρνείται Hedge Mode.
+5. **ETH ως εγγύηση.** Assets → Unified Trading → Collateral → ETH →
+   **On**. Το spot σκέλος πρέπει να μετρά ως εγγύηση για το short.
+6. **Spot Margin Trading: Off.** Το carry δεν δανείζεται ποτέ.
+7. **API key του subaccount.** API Management → Create → System-generated:
+   - Read-Write. Unified Trading: **Orders** και **Positions**, **Spot**
+     (trade), **Earn**.
+   - **Χωρίς Withdraw, χωρίς Transfer**, χωρίς τίποτα άλλο.
+   - IP restriction: **μόνο η IP του VPS**.
+   - Δεν είναι το κλειδί του yield rotation (κεντρικός λογαριασμός).
+8. **Κεφάλαιο, μόνο πριν από το live.** Μεταφορά 100 USDT
+   (`TOTAL_CAPITAL_CAP_USD`) από τον κεντρικό λογαριασμό στο Unified Trading
+   του subaccount. Το κλειδί δεν μπορεί να κάνει transfer. Κανένα ETH ή άλλο
+   νόμισμα στο subaccount: ό,τι δεν είναι στο book είναι `FOREIGN_BALANCE`.
+9. **Testnet, όταν το εγκρίνεις.** Τα ίδια 1–7 στο testnet.bybit.com, με
+   ξεχωριστό κλειδί testnet.
+
+Το κλειδί (βήμα 7) το δίνεις στον Hermes για το `/opt/hermes/.env` ως
+`BYBIT_CARRY_API_KEY` / `BYBIT_CARRY_API_SECRET`. Το `DRY_RUN: false` και το
+`DEADMAN_URL` αλλάζουν στο git, όχι στο UI.

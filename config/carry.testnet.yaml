@@ -1,0 +1,48 @@
+# config/carry.testnet.yaml — TESTNET ONLY (decision 13.6).
+# Lowered entry thresholds to force one full cycle on testnet:
+#   redeem from Earn -> entry (perp, then spot) -> >= 1 settlement ->
+#   exit (via an operator UNWIND) -> USDT back to Earn.
+# carry/config.py refuses this file unless BYBIT_TESTNET is set, and it keeps
+# the settlement window and every risk limit of production.
+
+TESTNET_ONLY: true
+SYMBOLS: [ETHUSDT]
+CYCLE_MINUTES: 5
+DRY_RUN: true                          # how the testnet run executes orders is Phase 6 (testnet only)
+LOG_DIR: /opt/hermes/logs/carry-testnet
+ACCOUNT_TYPE: UNIFIED
+EARN_COIN: USDT
+
+SPOT_TAKER_FEE: 0.001
+PERP_TAKER_FEE: 0.00055
+
+CALIBRATION_SOURCE: "forced testnet cycle — NOT a calibration"
+ENTRY_MIN_EXPECTED_APR: -100           # any funding
+ENTRY_MIN_PREDICTED_RATE: -1
+ENTRY_EV_MULTIPLE: 0
+EXIT_PREDICTED_FLOOR: -2               # no funding exit: the exit is the UNWIND
+EXIT_HORIZON_HOURS: 0.001
+SMOOTHING_SETTLEMENTS: 1
+MIN_HOLD_HOURS: 0
+MAX_ROUND_TRIPS_PER_30D: 1000
+NO_FUNDING_ACTION_BEFORE_SETTLEMENT_MIN: 15
+MAX_ENTRY_BASIS_BPS: 100               # thin testnet books
+MAX_FAVORABLE_BASIS_BPS: 1000
+MAX_SPREAD_BPS: 100
+
+TOTAL_CAPITAL_CAP_USD: 1000            # testnet funds
+MAX_NOTIONAL_PER_SYMBOL_USD: 200
+USDT_BUFFER_USD: 100
+MAX_USDT_BORROW_USD: 0
+
+REDEEM_TIMEOUT_HOURS: 2
+
+MAX_HEDGE_DRIFT_PCT: 2.0
+LEG_TIMEOUT_S: 30
+MMR_WARN: 0.25
+MMR_REDUCE: 0.40
+MMR_EMERGENCY: 0.60
+ADL_RANK_REDUCE: 4
+CVR_DROP_ALERT: 0.05
+UNDERPERFORMANCE_RATIO: 0.5
+DEADMAN_URL: null                      # supervised run; not required for TESTNET_ONLY

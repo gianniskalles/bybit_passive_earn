@@ -1,0 +1,172 @@
+{
+  "period": {
+    "start_ms": 1774972800000,
+    "end_ms": 1790496000000,
+    "days": 179.7,
+    "split_ms": 1782734400000
+  },
+  "verdict": {
+    "excess_apr": 0.0,
+    "excess_ok": false,
+    "worst_30d_return": 0.001382283105022831,
+    "worst_30d_ok": true,
+    "excess_apr_costs_x1_5": 0.0,
+    "worst_30d_costs_x1_5": 0.001382283105022831,
+    "robust_to_costs": false,
+    "go": false
+  },
+  "recommended_params": {
+    "entry_min_expected_apr": 0.03,
+    "entry_min_predicted_rate": 5e-05,
+    "exit_predicted_floor": -0.0001,
+    "exit_horizon_hours": 72,
+    "smoothing_settlements": 3,
+    "min_hold_hours": 72,
+    "max_round_trips_30d": 2,
+    "no_funding_action_before_settlement_min": 15,
+    "max_entry_basis_bps": null,
+    "max_spread_bps": null,
+    "spot_taker_fee": 0.001,
+    "perp_taker_fee": 0.00055
+  },
+  "in_sample": {
+    "excess_apr": 0.0
+  },
+  "out_of_sample": {
+    "predictor": "lagged",
+    "days": 90.0,
+    "net_apr": 0.01743037037037035,
+    "layer_a_apr": 0.01743037037037035,
+    "excess_apr": 0.0,
+    "entries": 0,
+    "exits": 0,
+    "round_trips": 0,
+    "costs": 0.0,
+    "time_in_position": 0.0,
+    "worst_30d_return": 0.001382283105022831,
+    "negative_share": 0.10925925925925926,
+    "longest_negative_days": 1.6666666666666667
+  },
+  "full_period_lagged": {
+    "predictor": "lagged",
+    "days": 180.0,
+    "net_apr": 0.017315185185185194,
+    "layer_a_apr": 0.017315185185185194,
+    "excess_apr": 0.0,
+    "entries": 0,
+    "exits": 0,
+    "round_trips": 0,
+    "costs": 0.0,
+    "time_in_position": 0.0,
+    "worst_30d_return": 0.001382283105022831,
+    "negative_share": 0.25833333333333336,
+    "longest_negative_days": 4.666666666666667
+  },
+  "full_period_oracle": {
+    "predictor": "oracle",
+    "days": 180.0,
+    "net_apr": 0.017315185185185194,
+    "layer_a_apr": 0.017315185185185194,
+    "excess_apr": 0.0,
+    "entries": 0,
+    "exits": 0,
+    "round_trips": 0,
+    "costs": 0.0,
+    "time_in_position": 0.0,
+    "worst_30d_return": 0.001382283105022831,
+    "negative_share": 0.25833333333333336,
+    "longest_negative_days": 4.666666666666667
+  },
+  "full_period_costs_x1_5": {
+    "predictor": "lagged",
+    "days": 180.0,
+    "net_apr": 0.017315185185185194,
+    "layer_a_apr": 0.017315185185185194,
+    "excess_apr": 0.0,
+    "entries": 0,
+    "exits": 0,
+    "round_trips": 0,
+    "costs": 0.0,
+    "time_in_position": 0.0,
+    "worst_30d_return": 0.001382283105022831,
+    "negative_share": 0.25833333333333336,
+    "longest_negative_days": 4.666666666666667
+  },
+  "per_symbol": {
+    "BTCUSDT": {
+      "lagged": {
+        "predictor": "lagged",
+        "days": 180.0,
+        "net_apr": 0.017315185185185194,
+        "layer_a_apr": 0.017315185185185194,
+        "excess_apr": 0.0,
+        "entries": 0,
+        "exits": 0,
+        "round_trips": 0,
+        "costs": 0.0,
+        "time_in_position": 0.0,
+        "worst_30d_return": 0.001382283105022831,
+        "negative_share": 0.25555555555555554,
+        "longest_negative_days": 4.666666666666667
+      },
+      "costs_x1_5": {
+        "predictor": "lagged",
+        "days": 180.0,
+        "net_apr": 0.017315185185185194,
+        "layer_a_apr": 0.017315185185185194,
+        "excess_apr": 0.0,
+        "entries": 0,
+        "exits": 0,
+        "round_trips": 0,
+        "costs": 0.0,
+        "time_in_position": 0.0,
+        "worst_30d_return": 0.001382283105022831,
+        "negative_share": 0.25555555555555554,
+        "longest_negative_days": 4.666666666666667
+      }
+    },
+    "ETHUSDT": {
+      "lagged": {
+        "predictor": "lagged",
+        "days": 180.0,
+        "net_apr": 0.017315185185185194,
+        "layer_a_apr": 0.017315185185185194,
+        "excess_apr": 0.0,
+        "entries": 0,
+        "exits": 0,
+        "round_trips": 0,
+        "costs": 0.0,
+        "time_in_position": 0.0,
+        "worst_30d_return": 0.001382283105022831,
+        "negative_share": 0.2611111111111111,
+        "longest_negative_days": 4.333333333333333
+      },
+      "costs_x1_5": {
+        "predictor": "lagged",
+        "days": 180.0,
+        "net_apr": 0.017315185185185194,
+        "layer_a_apr": 0.017315185185185194,
+        "excess_apr": 0.0,
+        "entries": 0,
+        "exits": 0,
+        "round_trips": 0,
+        "costs": 0.0,
+        "time_in_position": 0.0,
+        "worst_30d_return": 0.001382283105022831,
+        "negative_share": 0.2611111111111111,
+        "longest_negative_days": 4.333333333333333
+      }
+    }
+  },
+  "grid": {
+    "size": 324,
+    "passing_go": 0
+  },
+  "layer_a_coverage": {
+    "period_days": 179.67,
+    "covered_days": 6.92,
+    "extrapolated_days": 172.75
+  },
+  "assumed_layer_a_apr": null,
+  "data_source": "bybit https://api.bybit.com"
+}

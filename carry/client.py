@@ -1,0 +1,311 @@
+"""carry/client.py — Bybit v5 for the carry strategy (CARRY_PLAN §6, Phase 2).
+
+Built on the same fail-closed transport as bybit_earn_tool: every failure
+(HTTP, timeout, non-JSON, retCode != 0, a missing list, an unparseable row,
+a pagination that does not end) raises BybitAPIError. Nothing becomes an
+empty list: "no positions" and "could not read positions" never look the
+same. An empty list from a SUCCESSFUL call is a real answer.
+
+Writes: the Earn place-order inherited from BybitEarnTool (Stake/Redeem,
+built by place_order_request) and, from Phase 4, trading orders
+(POST /v5/order/create) built by order_request() and sent only by
+carry/execute.py. Neither is ever sent while DRY_RUN is true (execute.py
+refuses, and LiveExchange refuses again).
+"""
+
+from __future__ import annotations
+
+import urllib.parse
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any, Dict, List, Optional, Tuple
+
+from bybit_earn_tool import BybitAPIError, BybitEarnTool
+
+FUNDING_PAGE = 200
+APR_WINDOW_MS = 7 * 24 * 3600 * 1000      # what Bybit returned by default (VPS, 27/9)
+MAX_PAGES = 20                 # a cursor that does not end is a failure, not "all rows"
+PAGE_LIMIT = 50
+
+# Our orderLinkIds start with this; anything else on the account is foreign
+# (R2 FOREIGN_ACTIVITY).
+LINK_PREFIX = "cy-"
+ORDER_CREATE_PATH = "/v5/order/create"
+
+# R1: how Bybit refuses a region-restricted account is UNVERIFIED (§12). Both
+# signals only make the system more conservative (NO_NEW_POSITIONS); the first
+# real refusal gets captured and this is locked on it.
+REGION_RET_CODES = frozenset({10024})              # "compliance rules triggered"
+REGION_BODY_MARKERS = ("from your country", "restricted region", "not available in your region")
+
+
+def is_region_restricted(err: BaseException) -> bool:
+    if not isinstance(err, BybitAPIError):
+        return False
+    if err.ret_code in REGION_RET_CODES:
+        return True
+    body = str(err.body or "").lower()
+    return any(m in body for m in REGION_BODY_MARKERS)
+
+
+# Parameters that change on every call; recordings and replays ignore them.
+_VOLATILE = frozenset({"endTime", "startTime", "cursor", "limit"})
+
+
+def response_key(url: str) -> str:
+    """Key of a recorded response: path + sorted stable query parameters.
+    Shared by scripts/testnet.py (recording) and tests/replay.py (replay)."""
+    parsed = urllib.parse.urlparse(url)
+    params = sorted((k, v) for k, v in urllib.parse.parse_qsl(parsed.query)
+                    if k not in _VOLATILE)
+    return parsed.path + ("?" + urllib.parse.urlencode(params) if params else "")
+
+
+def fmt_step(value: float, step: float) -> str:
+    """value on the step's grid, as Bybit wants it: a plain decimal string."""
+    st = Decimal(str(step))
+    q = (Decimal(str(value)) / st).to_integral_value(rounding=ROUND_HALF_UP) * st
+    return format(q.normalize(), "f")
+
+
+def order_request(category: str, symbol: str, side: str, order_type: str, qty: float,
+                  qty_step: float, order_link_id: str, price: Optional[float] = None,
+                  tick: Optional[float] = None, reduce_only: bool = False) -> Dict[str, Any]:
+    """The exact request for POST /v5/order/create (CARRY_PLAN Phase 4).
+
+    linear: one-way mode (positionIdx 0); reduceOnly on every order that
+            closes (our short, or a long that is never ours).
+    spot:   isLeverage 0 (never borrows); a Market order states its qty in
+            the base coin (marketUnit baseCoin), never in USDT.
+    Limit orders are IOC: nothing rests on the book after the cycle.
+    """
+    if category not in ("linear", "spot"):
+        raise ValueError(f"category must be linear or spot, got {category!r}")
+    if side not in ("Buy", "Sell") or order_type not in ("Limit", "Market"):
+        raise ValueError(f"bad side/orderType {side!r}/{order_type!r}")
+    if not order_link_id.startswith(LINK_PREFIX):
+        raise ValueError(f"orderLinkId must start with {LINK_PREFIX!r}")
+    if reduce_only and category != "linear":
+        raise ValueError("reduceOnly exists only on linear")
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    body: Dict[str, Any] = {"category": category, "symbol": symbol, "side": side,
+                            "orderType": order_type, "qty": fmt_step(qty, qty_step),
+                            "orderLinkId": order_link_id}
+    if order_type == "Limit":
+        if price is None or tick is None or price <= 0:
+            raise ValueError("a Limit order needs a price and its tick")
+        body.update(price=fmt_step(price, tick), timeInForce="IOC")
+    if category == "linear":
+        body["positionIdx"] = 0
+        if reduce_only:
+            body["reduceOnly"] = True
+    else:
+        body["isLeverage"] = 0
+        if order_type == "Market":
+            body["marketUnit"] = "baseCoin"
+    return {"method": "POST", "path": ORDER_CREATE_PATH, "body": body}
+
+
+class CarryPublicClient(BybitEarnTool):
+    """Public market data only (no key needed)."""
+
+    def __init__(self, session=None, testnet: Optional[bool] = None,
+                 api_key: Optional[str] = None, api_secret: Optional[str] = None):
+        super().__init__(api_key=api_key, api_secret=api_secret, session=session, testnet=testnet)
+        # No fallback to BYBIT_API_KEY (BybitEarnTool's default): that is the
+        # yield rotation's account. The carry signs only with the key it was
+        # given — its own subaccount's (BYBIT_CARRY_API_KEY) — or not at all.
+        self.api_key, self.api_secret = api_key, api_secret
+
+    def _one(self, endpoint: str, params: Dict, what: str, signed: bool = False) -> Dict:
+        lst = self._list(self._request("GET", endpoint, params, signed=signed), endpoint, "list")
+        if not lst or not isinstance(lst[0], dict):
+            raise BybitAPIError(f"{endpoint}: no {what}")
+        return lst[0]
+
+    def get_funding_history(self, symbol: str, start_ms: int, end_ms: int) -> List[Tuple[int, float]]:
+        """Settled funding rates in [start_ms, end_ms], oldest first.
+
+        GET /v5/market/funding/history returns at most 200 rows, newest
+        first, up to endTime; we page backwards until start_ms."""
+        endpoint = "/v5/market/funding/history"
+        rows: Dict[int, float] = {}
+        cursor = end_ms
+        while True:
+            result = self._request("GET", endpoint, {"category": "linear", "symbol": symbol,
+                                                     "endTime": cursor, "limit": FUNDING_PAGE})
+            page = self._list(result, endpoint, "list")
+            if not page:
+                break
+            oldest = None
+            for ts, rate in self._funding_rows(page, endpoint):
+                if start_ms <= ts <= end_ms:
+                    rows[ts] = rate
+                oldest = ts if oldest is None else min(oldest, ts)
+            if oldest is None or oldest <= start_ms or len(page) < FUNDING_PAGE:
+                break
+            cursor = oldest - 1
+        return sorted(rows.items())
+
+    def get_recent_funding(self, symbol: str, count: int) -> List[Tuple[int, float]]:
+        """The last `count` settled rates, oldest first (one page, no endTime)."""
+        endpoint = "/v5/market/funding/history"
+        if not 1 <= count <= FUNDING_PAGE:
+            raise ValueError(f"count must be in 1..{FUNDING_PAGE}")
+        page = self._list(self._request("GET", endpoint, {"category": "linear", "symbol": symbol,
+                                                          "limit": count}), endpoint, "list")
+        return sorted(self._funding_rows(page, endpoint))[-count:]
+
+    @staticmethod
+    def _funding_rows(page, endpoint):
+        out = []
+        for r in page:
+            try:
+                out.append((int(r["fundingRateTimestamp"]), float(r["fundingRate"])))
+            except (KeyError, TypeError, ValueError) as e:
+                raise BybitAPIError(f"{endpoint}: unparseable row {r!r}") from e
+        return out
+
+    def get_instrument(self, category: str, symbol: str) -> Dict:
+        return self._one("/v5/market/instruments-info", {"category": category, "symbol": symbol},
+                         f"{category} instrument {symbol}")
+
+    def get_ticker(self, category: str, symbol: str) -> Dict:
+        return self._one("/v5/market/tickers", {"category": category, "symbol": symbol},
+                         f"{category} ticker {symbol}")
+
+    def get_linear_tickers(self) -> List[Dict]:
+        """Every linear ticker (for ranking perps by turnover24h)."""
+        endpoint = "/v5/market/tickers"
+        return self._list(self._request("GET", endpoint, {"category": "linear"}), endpoint, "list")
+
+    def get_collateral_ratios(self) -> Dict[str, float]:
+        """{coin: collateral ratio of its first tier} for every coin that can
+        be UTA collateral (GET /v5/spot-margin-trade/collateral, public).
+        The endpoint's shape is UNVERIFIED (§12): any surprise raises, and
+        the caller then treats collateral as unknown."""
+        endpoint = "/v5/spot-margin-trade/collateral"
+        lst = self._list(self._request("GET", endpoint, {}), endpoint, "list")
+        if not lst:
+            raise BybitAPIError(f"{endpoint}: empty list")
+        out: Dict[str, float] = {}
+        for row in lst:
+            try:
+                tiers = row["collateralRatioList"]
+                out[str(row["currency"]).upper()] = float(tiers[0]["collateralRatio"])
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                raise BybitAPIError(f"{endpoint}: unparseable row {row!r}") from e
+        return out
+
+    def get_orderbook(self, category: str, symbol: str, limit: int = 50) -> Dict:
+        endpoint = "/v5/market/orderbook"
+        result = self._request("GET", endpoint, {"category": category, "symbol": symbol,
+                                                 "limit": limit})
+        if not (isinstance(result.get("b"), list) and isinstance(result.get("a"), list)):
+            raise BybitAPIError(f"{endpoint}: response has no b/a lists")
+        return result
+
+    def get_usdt_flexible_apr_history(self, start_ms: Optional[int] = None,
+                                      end_ms: Optional[int] = None) -> Tuple[str, List[Dict]]:
+        """(productId, raw APR history) of the USDT FlexibleSaving product —
+        the Easy Earn rate of layer A.
+
+        Without a range Bybit returns only the last ~7 days. With one, the
+        range is walked backwards in APR_WINDOW_MS windows (startTime/endTime;
+        a longer window is not confirmed to work) and de-duplicated. Any
+        window that fails raises: a partial history is not a history."""
+        products = [p for p in self.get_earn_products(coin="USDT") if p.get("coin") == "USDT"]
+        if not products:
+            raise BybitAPIError("no USDT FlexibleSaving product")
+        pid = str(products[0]["productId"])
+        if start_ms is None or end_ms is None:
+            return pid, self.get_earn_apr_history(product_id=pid)
+        endpoint = "/v5/earn/apr-history"
+        rows: Dict[str, Dict] = {}
+        hi = int(end_ms)
+        while hi >= start_ms:
+            lo = max(int(start_ms), hi - APR_WINDOW_MS)
+            result = self._request("GET", endpoint, {"category": "FlexibleSaving", "productId": pid,
+                                                     "startTime": lo, "endTime": hi})
+            for r in self._list(result, endpoint, "list"):
+                if not isinstance(r, dict) or not str(r.get("timestamp", "")).isdigit():
+                    raise BybitAPIError(f"{endpoint}: unparseable row {r!r}")
+                rows[str(r["timestamp"])] = r
+            hi = lo - 1
+        return pid, sorted(rows.values(), key=lambda r: int(r["timestamp"]))
+
+
+class CarryClient(CarryPublicClient):
+    """Public + private (signed) reads, with the key passed in (the carry
+    subaccount's BYBIT_CARRY_API_KEY/SECRET; never a fallback)."""
+
+    def _paged(self, endpoint: str, params: Dict) -> List[Dict]:
+        rows: List[Dict] = []
+        cursor = ""
+        for _ in range(MAX_PAGES):
+            p = dict(params, limit=PAGE_LIMIT)
+            if cursor:
+                p["cursor"] = cursor
+            result = self._request("GET", endpoint, p, signed=True)
+            rows.extend(self._list(result, endpoint, "list"))
+            cursor = result.get("nextPageCursor") or ""
+            if not cursor:
+                return rows
+        raise BybitAPIError(f"{endpoint}: more than {MAX_PAGES} pages; refusing a partial list")
+
+    # ---- account --------------------------------------------------------------
+
+    def get_account_info(self) -> Dict:
+        return self._request("GET", "/v5/account/info", {}, signed=True)
+
+    def get_fee_rate(self, category: str, symbol: str) -> Dict:
+        return self._one("/v5/account/fee-rate", {"category": category, "symbol": symbol},
+                         f"fee rate for {category} {symbol}", signed=True)
+
+    def get_collateral_info(self, currency: str) -> Dict:
+        return self._one("/v5/account/collateral-info", {"currency": currency},
+                         f"collateral info for {currency}", signed=True)
+
+    def get_transaction_log(self, start_ms: int, end_ms: int, currency: str = "USDT",
+                            type_: Optional[str] = None) -> List[Dict]:
+        params = {"accountType": "UNIFIED", "currency": currency, "startTime": start_ms,
+                  "endTime": end_ms}
+        if type_:
+            params["type"] = type_
+        return self._paged("/v5/account/transaction-log", params)
+
+    # ---- positions, orders, executions -----------------------------------------
+
+    def get_positions(self, symbol: str) -> List[Dict]:
+        return self._paged("/v5/position/list", {"category": "linear", "symbol": symbol})
+
+    def get_open_orders(self, category: str) -> List[Dict]:
+        params = {"category": category}
+        if category == "linear":
+            params["settleCoin"] = "USDT"
+        return self._paged("/v5/order/realtime", params)
+
+    def find_order(self, category: str, order_link_id: str) -> Optional[Dict]:
+        """R23: look an order up by orderLinkId BEFORE any retry. Open orders
+        first, then history. None only when BOTH successful reads say it does
+        not exist; any read failure raises."""
+        for endpoint in ("/v5/order/realtime", "/v5/order/history"):
+            lst = self._list(self._request("GET", endpoint, {"category": category,
+                                                             "orderLinkId": order_link_id},
+                                           signed=True), endpoint, "list")
+            for o in lst:
+                if o.get("orderLinkId") == order_link_id:
+                    return o
+        return None
+
+    def get_executions(self, category: str, symbol: str, start_ms: int) -> List[Dict]:
+        return self._paged("/v5/execution/list", {"category": category, "symbol": symbol,
+                                                  "startTime": start_ms})
+
+    # ---- writes (Phase 4; sent only by carry/execute.py) ----------------------------
+
+    def create_order(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Send a request built by order_request(), verbatim."""
+        if request.get("method") != "POST" or request.get("path") != ORDER_CREATE_PATH:
+            raise ValueError("create_order only sends POST /v5/order/create requests")
+        return self._request("POST", ORDER_CREATE_PATH, request["body"], signed=True)

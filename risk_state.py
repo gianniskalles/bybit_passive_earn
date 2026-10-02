@@ -15,8 +15,8 @@ a Verification whose `code` is one of the CODE_* constants below, plus the
 two independent facts callers need — is the signature valid, is it fresh.
 
 CLI (reads the key via settings.load_env, the path via settings):
-  python risk_state.py verify
-  python risk_state.py write <STATE> <reason...>      # source = operator
+  python risk_state.py [--system yield|carry] verify
+  python risk_state.py [--system yield|carry] write <STATE> <reason...>   # source = operator
 """
 
 from __future__ import annotations
@@ -32,7 +32,11 @@ from typing import Any, Dict, Optional
 import settings
 from signing import sign, verify as verify_sig
 
-PROFILE = "hermes-yield-rotation"
+PROFILE = "hermes-yield-rotation"          # the yield rotation's record
+CARRY_PROFILE = "hermes-carry"              # the carry strategy's record (own file)
+# A record is only valid for the profile it was written for, so one system's
+# file can never be read as the other's.
+SYSTEM_PROFILES = {"yield": PROFILE, "carry": CARRY_PROFILE}
 STATES = ("NORMAL", "NO_NEW_POSITIONS", "UNWIND")
 SOURCE_BOOTSTRAP = "heartbeat_bootstrap"
 SOURCE_RENEW = "heartbeat_renew"
@@ -79,15 +83,17 @@ def _now_ms() -> int:
 
 
 def make_record(secret: str, state: str, reason: str, source: str,
-                ts_ms: Optional[int] = None) -> Dict[str, Any]:
+                ts_ms: Optional[int] = None, profile: str = PROFILE) -> Dict[str, Any]:
     if state not in STATES:
         raise ValueError(f"invalid state {state!r}; expected one of {STATES}")
     if source not in SOURCES:
         raise ValueError(f"invalid source {source!r}; expected one of {SOURCES}")
     if not secret:
         raise ValueError("HMAC secret is empty")
+    if profile not in SYSTEM_PROFILES.values():
+        raise ValueError(f"invalid profile {profile!r}")
     obj = {
-        "profile": PROFILE,
+        "profile": profile,
         "state": state,
         "ts": _now_ms() if ts_ms is None else int(ts_ms),
         "reason": str(reason),
@@ -98,9 +104,9 @@ def make_record(secret: str, state: str, reason: str, source: str,
 
 
 def write(path: Path, secret: str, state: str, reason: str, source: str,
-          ts_ms: Optional[int] = None) -> Dict[str, Any]:
+          ts_ms: Optional[int] = None, profile: str = PROFILE) -> Dict[str, Any]:
     """Atomically write a signed record (tmp + replace). Returns the record."""
-    obj = make_record(secret, state, reason, source, ts_ms)
+    obj = make_record(secret, state, reason, source, ts_ms, profile)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -109,7 +115,7 @@ def write(path: Path, secret: str, state: str, reason: str, source: str,
     return obj
 
 
-def _shape_problem(obj: Any) -> Optional[str]:
+def _shape_problem(obj: Any, profile: str = PROFILE) -> Optional[str]:
     if not isinstance(obj, dict):
         return f"top-level JSON is {type(obj).__name__}, expected object"
     missing = [f for f in _FIELDS if f not in obj]
@@ -125,8 +131,8 @@ def _shape_problem(obj: Any) -> Optional[str]:
     for f in ("profile", "state", "reason", "source"):
         if not isinstance(obj[f], str):
             return f"{f} is not a string"
-    if obj["profile"] != PROFILE:
-        return f"profile {obj['profile']!r} != {PROFILE!r}"
+    if obj["profile"] != profile:
+        return f"profile {obj['profile']!r} != {profile!r}"
     if obj["state"] not in STATES:
         return f"invalid state {obj['state']!r}"
     if obj["source"] not in SOURCES:
@@ -135,7 +141,7 @@ def _shape_problem(obj: Any) -> Optional[str]:
 
 
 def verify(path: Path, secret: str, now_ms: Optional[int] = None,
-           max_age_ms: int = MAX_AGE_MS) -> Verification:
+           max_age_ms: int = MAX_AGE_MS, profile: str = PROFILE) -> Verification:
     """Verify the file at `path`. Never raises."""
     if not secret:
         return Verification(CODE_NO_KEY, False, False, detail="HMAC key not set")
@@ -151,7 +157,7 @@ def verify(path: Path, secret: str, now_ms: Optional[int] = None,
     except ValueError as e:
         return Verification(CODE_UNREADABLE, False, False, detail=f"not JSON: {e}")
 
-    problem = _shape_problem(obj)
+    problem = _shape_problem(obj, profile)
     if problem:
         return Verification(CODE_MALFORMED, False, False, detail=problem)
 
@@ -174,15 +180,22 @@ def verify(path: Path, secret: str, now_ms: Optional[int] = None,
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    system = "yield"
+    if argv[:1] == ["--system"] and len(argv) >= 2:
+        system, argv = argv[1], argv[2:]
+    if system not in SYSTEM_PROFILES:
+        print(f"unknown --system {system!r}; one of {sorted(SYSTEM_PROFILES)}", file=sys.stderr)
+        return 2
+    profile = SYSTEM_PROFILES[system]
     env = settings.load_env()
     secret = env.get("HERMES_RISK_HMAC_KEY", "")
-    path = settings.risk_state_file()
+    path = settings.carry_risk_state_file() if system == "carry" else settings.risk_state_file()
     if argv[:1] == ["verify"] and len(argv) == 1:
-        v = verify(path, secret)
+        v = verify(path, secret, profile=profile)
         print(json.dumps(v.as_dict(), indent=2))
         return 0 if v.ok else 1
     if argv[:1] == ["write"] and len(argv) >= 3:
-        obj = write(path, secret, argv[1], " ".join(argv[2:]), SOURCE_OPERATOR)
+        obj = write(path, secret, argv[1], " ".join(argv[2:]), SOURCE_OPERATOR, profile=profile)
         print(json.dumps(obj, indent=2))
         return 0
     print(__doc__.split("CLI", 1)[1], file=sys.stderr)

@@ -15,6 +15,13 @@ Path overrides (all optional; defaults match the VPS layout):
   YIELD_ENV_FILE         $YIELD_HERMES_HOME/.env      (profile secrets)
   YIELD_SHARED_ENV_FILE  /opt/data/.env               (shared; TELEGRAM_BOT_TOKEN only)
   YIELD_NOTIFY_STATE     $YIELD_HERMES_HOME/state/notify_state.json (Telegram dedup)
+  YIELD_CARRY_CONFIG_FILE  <repo>/config/carry.yaml
+  YIELD_CARRY_STATE_FILE   $YIELD_HERMES_HOME/state/carry_risk_state.json
+  YIELD_CARRY_ADOPT_FILE   $YIELD_HERMES_HOME/state/carry_adopt_request.json
+  YIELD_CARRY_BOOK_FILE    $YIELD_HERMES_HOME/state/carry_book.json
+  YIELD_CARRY_PAPER_FILE   $YIELD_HERMES_HOME/state/carry_paper.json   (DRY_RUN account)
+  YIELD_CARRY_HOLD_FILE    $YIELD_HERMES_HOME/state/carry_hold.json    (NO_NEW_POSITIONS latch)
+  YIELD_CARRY_CYCLE_FILE   $YIELD_HERMES_HOME/state/carry_cycle.json   (last cycle time)
 
 Env precedence (load_env):
   process env  >  profile .env  >  shared .env (TELEGRAM_BOT_TOKEN only)
@@ -70,6 +77,34 @@ def env_file() -> Path:
 
 def shared_env_file() -> Path:
     return _path("YIELD_SHARED_ENV_FILE", Path("/opt/data/.env"))
+
+
+def carry_config_file() -> Path:
+    return _path("YIELD_CARRY_CONFIG_FILE", ROOT / "config" / "carry.yaml")
+
+
+def carry_risk_state_file() -> Path:
+    return _path("YIELD_CARRY_STATE_FILE", hermes_home() / "state" / "carry_risk_state.json")
+
+
+def carry_adopt_file() -> Path:
+    return _path("YIELD_CARRY_ADOPT_FILE", hermes_home() / "state" / "carry_adopt_request.json")
+
+
+def carry_book_file() -> Path:
+    return _path("YIELD_CARRY_BOOK_FILE", hermes_home() / "state" / "carry_book.json")
+
+
+def carry_paper_file() -> Path:
+    return _path("YIELD_CARRY_PAPER_FILE", hermes_home() / "state" / "carry_paper.json")
+
+
+def carry_hold_file() -> Path:
+    return _path("YIELD_CARRY_HOLD_FILE", hermes_home() / "state" / "carry_hold.json")
+
+
+def carry_cycle_file() -> Path:
+    return _path("YIELD_CARRY_CYCLE_FILE", hermes_home() / "state" / "carry_cycle.json")
 
 
 def notify_state_file() -> Path:

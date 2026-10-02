@@ -39,7 +39,16 @@ PLACE_ORDER_PATH = "/v5/earn/place-order"
 
 
 class BybitAPIError(RuntimeError):
-    """Any failure to get a valid answer from Bybit."""
+    """Any failure to get a valid answer from Bybit. `ret_code` (Bybit's
+    retCode) and `http_status`/`body` (HTTP errors) are kept so callers can
+    classify it, e.g. a region restriction (CARRY_PLAN R1)."""
+
+    def __init__(self, message: str, ret_code: Optional[int] = None,
+                 http_status: Optional[int] = None, body: str = ""):
+        super().__init__(message)
+        self.ret_code = ret_code
+        self.http_status = http_status
+        self.body = body
 
 
 def _truthy(value: Optional[str]) -> bool:
@@ -120,14 +129,19 @@ class BybitEarnTool:
             resp.raise_for_status()
             payload = resp.json()
         except requests.RequestException as e:
-            raise BybitAPIError(f"{endpoint}: HTTP error: {e}") from e
+            response = getattr(e, "response", None)
+            raise BybitAPIError(f"{endpoint}: HTTP error: {e}",
+                                http_status=getattr(response, "status_code", None),
+                                body=str(getattr(response, "text", "") or "")[:500]) from e
         except ValueError as e:
             raise BybitAPIError(f"{endpoint}: response is not JSON") from e
         if not isinstance(payload, dict):
             raise BybitAPIError(f"{endpoint}: response is not an object")
         if payload.get("retCode") != 0:
-            raise BybitAPIError(f"{endpoint}: retCode={payload.get('retCode')} "
-                                f"retMsg={payload.get('retMsg')!r}")
+            code = payload.get("retCode")
+            raise BybitAPIError(f"{endpoint}: retCode={code} retMsg={payload.get('retMsg')!r}",
+                                ret_code=code if isinstance(code, int) else None,
+                                body=str(payload.get("retMsg") or "")[:500])
         result = payload.get("result")
         if not isinstance(result, dict):
             raise BybitAPIError(f"{endpoint}: missing `result` object")
