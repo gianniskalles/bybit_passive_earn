@@ -354,9 +354,35 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     το βιβλίο (αγορά πάνω, πώληση κάτω).
   - **Ανεπιβεβαίωτο (§12):** στο live, το funding διαβάζεται από το
     transaction log (`SETTLEMENT`, πεδίο `change`).
-- ⏳ **Φάση 6:** units `yield-carry-*`, βήματα στο `deploy.sh` (ποτέ μηδενισμός
-  του book όσο το exchange δείχνει θέσεις, 13.15), Telegram `/unwind carry`,
-  ημερήσια σύνοψη. Testnet μόνο με έγκριση του Giannis.
+- ✅ **Φάση 5 εγκρίθηκε 2/10.**
+- ✅ **Φάση 6 — λειτουργία** (`DEPLOY.md`, ενότητα «Carry»):
+  - Units: `yield-carry-cycle` (5'), `yield-carry-heartbeat` (5', offset 3'),
+    `yield-carry-summary` (06:50 UTC), `yield-carry-calibrate` (1η του μήνα).
+  - `deploy.sh --system carry|yield` (χωρίς: κρατά το ενεργό σύστημα):
+    **ποτέ και τα δύο**. Το carry σβήνει πρώτα τους timers του yield rotation.
+    Η επιστροφή στο yield αρνείται αν το carry κρατά οτιδήποτε
+    (`preflight carry-exposure`: exchange, paper, book· μη αναγνώσιμο =
+    κρατά). Ούτε νέο κλειδί HMAC ούτε μετακίνηση του book όσο το carry κρατά
+    οτιδήποτε (2/10). Το βήμα 7 αποτυγχάνει αν μείνει ενεργός timer του άλλου.
+  - Δικό του κλειδί `BYBIT_CARRY_API_KEY/SECRET` (subaccount)· ο
+    `CarryClient` δεν πέφτει ποτέ πίσω στο `BYBIT_API_KEY` του yield rotation
+    (το έκανε σιωπηλά πριν).
+  - Telegram: `/unwind carry`, `/resume carry` (λύνει και το `CARRY_HOLD`),
+    `/unwind all`, `/status` και για τα δύο. Η ειδοποίηση του carry πάει στο
+    chat του operator (το `carry.yaml` δεν έχει δικό του — πριν, δεν έστελνε).
+  - Ημερήσια σύνοψη (`summary.py --system carry`): μία γραμμή ανά σύμβολο με το
+    εξομαλυμένο funding έναντι του κατωφλιού (`ETH: 2,6% — χρειάζεται 6,7% (5%
+    πάνω από το Earn 1,7%)`), book, ledger 24 ωρών, paper λογαριασμός, κράτημα.
+  - Μηνιαία μέτρηση (13.7, `tools/carry_monthly.py`): βαθμονόμηση της Φάσης 0Β
+    + τα κατώφλια του config στα ίδια δεδομένα → Telegram. Δεν αλλάζει ποτέ το
+    config.
+  - Διορθώσεις: το record του carry γράφει `risk_state_meta` (χωρίς αυτό το
+    heartbeat δεν θα προωθούσε ποτέ το bootstrap σε `NORMAL`)· `DEADMAN_URL`
+    υποχρεωτικό μόνο σε live config (αλλιώς το paper δεν ξεκινούσε)·
+    `RISK_STATE_*` χωρίς διπλό πρόθεμα.
+  - Λίστα για τον Giannis στο Bybit UI: `DEPLOY.md`, «Carry — τι κάνει ο
+    Giannis στο Bybit UI».
+  - Testnet μόνο με έγκριση του Giannis.
 
 ## 9. Ανοιχτά — τι μένει
 

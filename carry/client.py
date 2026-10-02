@@ -112,6 +112,10 @@ class CarryPublicClient(BybitEarnTool):
     def __init__(self, session=None, testnet: Optional[bool] = None,
                  api_key: Optional[str] = None, api_secret: Optional[str] = None):
         super().__init__(api_key=api_key, api_secret=api_secret, session=session, testnet=testnet)
+        # No fallback to BYBIT_API_KEY (BybitEarnTool's default): that is the
+        # yield rotation's account. The carry signs only with the key it was
+        # given — its own subaccount's (BYBIT_CARRY_API_KEY) — or not at all.
+        self.api_key, self.api_secret = api_key, api_secret
 
     def _one(self, endpoint: str, params: Dict, what: str, signed: bool = False) -> Dict:
         lst = self._list(self._request("GET", endpoint, params, signed=signed), endpoint, "list")
@@ -232,7 +236,8 @@ class CarryPublicClient(BybitEarnTool):
 
 
 class CarryClient(CarryPublicClient):
-    """Public + private (signed) reads. Needs BYBIT_API_KEY/SECRET."""
+    """Public + private (signed) reads, with the key passed in (the carry
+    subaccount's BYBIT_CARRY_API_KEY/SECRET; never a fallback)."""
 
     def _paged(self, endpoint: str, params: Dict) -> List[Dict]:
         rows: List[Dict] = []

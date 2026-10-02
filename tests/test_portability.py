@@ -55,7 +55,7 @@ MODULES = ["run_yield_cycle", "heartbeat", "bybit_earn_tool", "executor", "signi
            "carry.decide", "carry.backtest", "carry.client",
            "carry.config", "carry.state", "carry.snapshot", "carry.preflight", "carry.plan",
            "carry.execute", "carry.adopt", "carry.book", "carry.paper", "carry.ledger",
-           "carry.risk", "run_carry_cycle"]
+           "carry.risk", "carry.exposure", "run_carry_cycle", "tools.carry_monthly"]
 
 
 def _clean_env(repo=REPO_ROOT, **extra):

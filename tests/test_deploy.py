@@ -29,6 +29,9 @@ sys.path.insert(0, str(REPO / "deploy"))
 import preflight  # noqa: E402
 
 SMOKE = "smoke-test-only-do-not-use-in-prod"
+CARRY_TIMERS = ("yield-carry-cycle.timer", "yield-carry-heartbeat.timer",
+                "yield-carry-summary.timer", "yield-carry-calibrate.timer")
+YIELD_TIMERS = ("yield-cycle.timer", "yield-heartbeat.timer", "yield-summary.timer")
 
 
 def _write_env(path: Path, **kv):
@@ -224,7 +227,11 @@ case "$name" in
     if [[ ${1:-} == -m ]]; then key="python.$2"
     elif [[ ${1:-} == */preflight.py ]]; then key="python.preflight.$2"
     else key="python.$(basename "${1:-x}" .py)"; fi ;;
-  systemctl) key="systemctl.$1" ;;
+  systemctl) key="systemctl.$1"
+    # A per-unit answer (systemctl.<verb>.<unit>.{out,rc}) wins over the verb's.
+    if [[ -n ${2:-} && ( -f "$STUB_DIR/systemctl.$1.$2.out" || -f "$STUB_DIR/systemctl.$1.$2.rc" ) ]]; then
+      key="systemctl.$1.$2"
+    fi ;;
   *) key="$name.${1:-}" ;;
 esac
 # Keys listed in $STUB_PASSTHROUGH run for real (e.g. a real preflight check).
@@ -265,6 +272,10 @@ def sandbox(tmp_path):
                                            "  -m MODEL\n  --reasoning LEVEL\n")
     (stubs / "systemctl.is-active.out").write_text("active\n")
     (stubs / "systemctl.is-enabled.out").write_text("enabled\n")
+    # The yield rotation is the active system; the carry timers are off.
+    for t in CARRY_TIMERS:
+        (stubs / f"systemctl.is-enabled.{t}.out").write_text("disabled\n")
+        (stubs / f"systemctl.is-active.{t}.out").write_text("inactive\n")
     # regression report: absent before the run, passing after it
     (stubs / "python.preflight.regression-ok.rc").write_text("1\n0\n")
     (stubs / "python.preflight.regression-report.out").write_text(str(tmp_path / "reg.json") + "\n")
@@ -294,8 +305,8 @@ def sandbox(tmp_path):
 
         env_extra: dict = {}
 
-        def run(self):
-            return subprocess.run(["bash", str(REPO / "deploy" / "deploy.sh")],
+        def run(self, *args):
+            return subprocess.run(["bash", str(REPO / "deploy" / "deploy.sh"), *args],
                                   env={**env, **self.env_extra},
                                   capture_output=True, text=True, timeout=60)
 

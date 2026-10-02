@@ -1,0 +1,9 @@
+[Unit]
+Description=Funding carry — daily summary at 06:50 UTC
+
+[Timer]
+OnCalendar=*-*-* 06:50:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

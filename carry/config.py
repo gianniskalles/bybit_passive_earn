@@ -166,8 +166,12 @@ def validate(cfg: Any, testnet: bool, alt_report: Optional[Dict] = None) -> List
     errors: List[str] = []
     testnet_only = cfg.get("TESTNET_ONLY") is True
     for key, (check, desc) in SCHEMA.items():
-        if key == "DEADMAN_URL" and testnet_only and cfg.get(key) is None:
-            continue  # the forced testnet cycle is supervised by hand
+        if key == "DEADMAN_URL" and cfg.get(key) is None and (
+                testnet_only or cfg.get("DRY_RUN") is True):
+            # The forced testnet cycle is supervised by hand; paper trading
+            # risks nothing. The external liveness check is a gate before
+            # money (§10.4, decision 13.9: unset until just before live).
+            continue
         if key not in cfg or cfg[key] is None:
             errors.append(f"{key}: unset — {desc}")
         elif not check(cfg[key]):

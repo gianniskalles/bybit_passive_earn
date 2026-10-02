@@ -222,7 +222,7 @@ def _ini(path):
 def test_service_units(unit):
     svc = _ini(unit)["Service"]
     assert svc["User"] == "hermes" and svc["Group"] == "hermes"
-    exe, script = svc["ExecStart"].split()
+    exe, script, *args = svc["ExecStart"].split()
     assert exe == "/opt/hermes/venvs/yield_rotation/bin/python"
     assert script.startswith("/opt/hermes/yield_rotation/")
     assert (REPO / script.removeprefix("/opt/hermes/yield_rotation/")).is_file()
@@ -233,7 +233,10 @@ def test_service_units(unit):
 def test_timer_cadence():
     cal = {t.stem: _ini(t)["Timer"]["OnCalendar"] for t in TIMERS}
     assert cal == {"yield-cycle": "*:0/10", "yield-heartbeat": "*:2/5",
-                   "yield-summary": "*-*-* 06:55:00 UTC"}
+                   "yield-summary": "*-*-* 06:55:00 UTC",
+                   "yield-carry-cycle": "*:0/5", "yield-carry-heartbeat": "*:3/5",
+                   "yield-carry-summary": "*-*-* 06:50:00 UTC",
+                   "yield-carry-calibrate": "*-*-01 07:10:00 UTC"}
     for t in TIMERS:
         assert (REPO / "deploy" / f"{t.stem}.service").is_file()
 

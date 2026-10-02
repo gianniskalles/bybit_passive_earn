@@ -98,11 +98,17 @@ def capture(coin: str) -> Path:
 def carry_capture() -> Path:
     """Read-only: one carry snapshot on testnet (CARRY_PLAN Phase 2), every
     raw response saved keyed by response_key() for tests/test_carry_phase2.py."""
-    _tool()   # the testnet + credentials refusals
+    env = settings.load_env()
+    if not _truthy(env.get("BYBIT_TESTNET")):
+        raise SystemExit("refusing: BYBIT_TESTNET is not set to 1 (this script is testnet-only)")
+    key, secret = env.get("BYBIT_CARRY_API_KEY"), env.get("BYBIT_CARRY_API_SECRET")
+    if not (key and secret):
+        raise SystemExit("BYBIT_CARRY_API_KEY / BYBIT_CARRY_API_SECRET (testnet) not set")
     import yaml
     cfg = yaml.safe_load((ROOT / "config" / "carry.yaml").read_text())
     session = RecordingSession()
-    snap = carry_snapshot.take(CarryClient(session=session, testnet=True), cfg)
+    snap = carry_snapshot.take(CarryClient(session=session, testnet=True, api_key=key,
+                                           api_secret=secret), cfg)
     out = {"_comment": "REAL testnet capture, scripts/testnet.py carry-capture",
            "recorded_at_ms": snap.taken_ms,
            "snapshot_errors": dict(snap.errors), "snapshot_stale": dict(snap.stale),

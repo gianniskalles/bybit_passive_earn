@@ -46,6 +46,7 @@ from carry import snapshot as snapshot_mod
 from carry.paper import PaperExchange
 from carry.plan import FLAT, OPEN, plan_cycle
 
+CARRY_KEY, CARRY_SECRET = "BYBIT_CARRY_API_KEY", "BYBIT_CARRY_API_SECRET"
 CONSERVATIVE = {"NORMAL": 0, "NO_NEW_POSITIONS": 1, "UNWIND": 2}
 LEDGER_LOOKBACK_MS = 15 * 86_400_000
 
@@ -65,7 +66,7 @@ def resolve_risk_state(key: str, now_ms: int) -> Tuple[str, Any, List[str]]:
         eff = v.state if v.fresh else ("UNWIND" if v.state == "UNWIND" else "NO_NEW_POSITIONS")
     else:
         eff = "NO_NEW_POSITIONS"
-    return eff, v, ([] if v.ok else [f"RISK_STATE_{v.code}: {v.detail}"])
+    return eff, v, ([] if v.ok else [f"{v.code}: {v.detail}"])
 
 
 def public_apr(client) -> Tuple[Optional[str], Optional[float], Optional[str]]:
@@ -182,6 +183,9 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
     # ---- risk state + hold latch ---------------------------------------------------
     state, verification, rs_alerts = resolve_risk_state(key, now)
     alerts.extend(rs_alerts)
+    # The heartbeat promotes its bootstrap record only after a clean cycle
+    # verified exactly that record (heartbeat.clean_cycle_verified).
+    rec["risk_state_meta"] = verification.as_dict()
     hold_file = settings.carry_hold_file()
     hold = risk.read_hold(hold_file)
     if hold and risk.hold_released(hold, verification):
@@ -234,6 +238,7 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
     rec["decisions"] = {s: {"action": d.action, "kind": d.kind, "reason": d.reason}
                         for s, d in plan.decisions.items()}
     rec["no_entry"] = {s: list(w) for s, w in plan.no_entry.items()}
+    rec["funding"] = funding_view(plan.decisions, snap, cfg)
     rec["actions"] = [a.__dict__ for a in plan.actions]
     result = ex.execute_plan(plan, snap, cfg, state, book, cycle_id, venue, clock=clock,
                              sleep=sleep)
@@ -278,6 +283,18 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
     return 0
 
 
+def funding_view(decisions, snap, cfg) -> Dict[str, Dict]:
+    """Per symbol: the smoothed funding as an APR now, and what the entry rule
+    needs it to be (ENTRY_MIN_EXPECTED_APR above layer A, decide.py) — the
+    daily summary shows how close an entry is."""
+    layer_a = snap.earn.apr if snap.earn is not None else None
+    need = float(cfg["ENTRY_MIN_EXPECTED_APR"])
+    return {s: {"smoothed_apr": d.expected_apr, "layer_a_apr": layer_a,
+                "entry_min_expected_apr": need,
+                "required_apr": None if layer_a is None else need + layer_a}
+            for s, d in decisions.items()}
+
+
 def notify_cycle(rec: Dict, notifier) -> None:
     from heartbeat import CARRY_BLOCKING_CODES, _is_blocking_code
     blocking = sorted({c for c in (_is_blocking_code(a, CARRY_BLOCKING_CODES)
@@ -309,7 +326,9 @@ def main() -> int:
                       testnet=env.get("BYBIT_TESTNET", "").lower() in ("1", "true", "yes"))
     except cc.CarryConfigError as e:
         error = str(e)
-    client = CarryClient(api_key=env.get("BYBIT_API_KEY"), api_secret=env.get("BYBIT_API_SECRET"))
+    # Its own key, for its own subaccount (CARRY_PLAN §3.6, 0A). Never the
+    # yield rotation's BYBIT_API_KEY: two systems never share an account.
+    client = CarryClient(api_key=env.get(CARRY_KEY), api_secret=env.get(CARRY_SECRET))
     lock_path = settings.hermes_home() / "state" / "carry_cycle.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as lock:

@@ -58,6 +58,22 @@ jobs:
           done
           # Stop the timers again: the runner has no keys and no agent.
           sudo systemctl disable --now yield-cycle.timer yield-heartbeat.timer yield-summary.timer
+      - name: install.sh --system carry — the yield timers off, the carry timers on, never both
+        run: |
+          sudo systemctl enable --now yield-cycle.timer yield-heartbeat.timer yield-summary.timer
+          sudo /opt/hermes/yield_rotation/deploy/install.sh --system carry
+          for t in yield-carry-cycle.timer yield-carry-heartbeat.timer yield-carry-summary.timer yield-carry-calibrate.timer; do
+            test "$(systemctl is-enabled "$t")" = enabled
+          done
+          for t in yield-cycle.timer yield-heartbeat.timer yield-summary.timer; do
+            test "$(systemctl is-active "$t")" != active
+          done
+          # Back to the yield rotation goes through deploy.sh (carry-exposure first):
+          if sudo /opt/hermes/yield_rotation/deploy/install.sh; then
+            echo "install.sh switched back to yield while the carry timers were enabled"; exit 1
+          fi
+          sudo systemctl disable --now yield-carry-cycle.timer yield-carry-heartbeat.timer \
+            yield-carry-summary.timer yield-carry-calibrate.timer
       - name: deploy.sh syntax and refusal without root
         run: |
           bash -n /opt/hermes/yield_rotation/deploy/deploy.sh

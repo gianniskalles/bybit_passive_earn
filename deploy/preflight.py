@@ -18,6 +18,25 @@ Secrets are never printed: only sha256 fingerprints (first 12 hex chars).
   regression-report       print the report path for this prompt + model
   regression-ok PATH      that report exists and every run passed
   has-bot-token           YIELD_TELEGRAM_BOT_TOKEN is configured
+
+  keys --system carry     as `keys`, for the carry: its own BYBIT_CARRY_API_KEY/
+                          SECRET (optional under DRY_RUN, never copied from the
+                          shared .env, never the yield rotation's key); the
+                          yield rotation's Bybit keys are not required
+  carry-dry-run-on        config/carry.yaml says DRY_RUN: true (boolean)
+  carry-exposure          the carry holds nothing (exchange, paper account,
+                          book) -> 0; holds something or cannot be read -> 1
+  carry-reset-book-if-invalid
+                          an unreadable carry book is moved aside ONLY while
+                          carry-exposure is FLAT; otherwise FAIL (recovery is
+                          Telegram /adopt carry, decision 13.15)
+  carry-reset-state-if-invalid / carry-check-cycle / carry-expect-normal
+                          the yield rotation's checks, on the carry's own
+                          risk state and cycle records
+
+A new HMAC key is never generated while carry-exposure is not FLAT: the
+carry book and risk state are signed with it, and a new key would make the
+book unreadable (BOOK_UNREADABLE -> BOOK_MISMATCH -> hold).
 """
 
 from __future__ import annotations
@@ -46,6 +65,7 @@ from notify import Notifier, send_telegram  # noqa: E402
 
 SMOKE_MARKER = "smoke-test"
 MIN_HMAC_LEN = 32
+CARRY_KEY, CARRY_SECRET = "BYBIT_CARRY_API_KEY", "BYBIT_CARRY_API_SECRET"
 
 
 def fingerprint(value: str) -> str:
@@ -78,7 +98,49 @@ def _rewrite_env(path: Path, updates: Dict[str, str]) -> None:
 
 # --------------------------------------------------------------------------- #
 
+def _carry_cfg() -> dict:
+    try:
+        cfg = yaml.safe_load(settings.carry_config_file().read_text())
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, yaml.YAMLError):
+        return {}
+
+
+def _carry_client(env: Dict[str, str]):
+    """The carry's own read client, or None without its key. Never testnet:
+    deploy only ever looks at mainnet."""
+    if not (env.get(CARRY_KEY) and env.get(CARRY_SECRET)):
+        return None
+    from carry.client import CarryClient
+    return CarryClient(api_key=env[CARRY_KEY], api_secret=env[CARRY_SECRET], testnet=False)
+
+
+def carry_exposure(env: Optional[Dict[str, str]] = None):
+    """carry.exposure.check with the deploy's paths (imported here: the
+    DRY_RUN checks must not depend on the carry's imports)."""
+    from carry import exposure as cx
+    env = settings.load_env() if env is None else env
+    cfg = _carry_cfg()
+    try:
+        client = _carry_client(env)
+    except Exception as e:                                       # noqa: BLE001
+        return cx.Exposure(cx.UNKNOWN, [f"carry client: {e}"])
+    if client is not None and not (cfg.get("SYMBOLS") and cfg.get("SMOOTHING_SETTLEMENTS")
+                                   and cfg.get("EARN_COIN")):
+        return cx.Exposure(cx.UNKNOWN,
+                                       [f"{settings.carry_config_file()}: unreadable"])
+    return cx.check(client, cfg, settings.carry_book_file(),
+                                env.get("HERMES_RISK_HMAC_KEY", ""), settings.carry_paper_file())
+
+
+def _print_exposure(e) -> None:
+    print(f"carry exposure: {e.verdict}")
+    for line in e.lines:
+        print(f"  {line}")
+
+
 def cmd_keys(args: List[str]) -> int:
+    system = "carry" if args[:2] == ["--system", "carry"] else "yield"
     prof_path, shared_path = settings.env_file(), settings.shared_env_file()
     prof = settings.load_env_file(prof_path)
     shared = settings.load_env_file(shared_path)
@@ -90,9 +152,19 @@ def cmd_keys(args: List[str]) -> int:
     if not hmac_key or SMOKE_MARKER in hmac_key or len(hmac_key) < MIN_HMAC_LEN:
         why = "missing" if not hmac_key else ("smoke-test key" if SMOKE_MARKER in hmac_key
                                               else "too short")
-        updates["HERMES_RISK_HMAC_KEY"] = secrets.token_hex(32)
-        rows.append(("HERMES_RISK_HMAC_KEY", f"GENERATED (was {why})",
-                     fingerprint(updates["HERMES_RISK_HMAC_KEY"])))
+        exposure = carry_exposure({**prof, "HERMES_RISK_HMAC_KEY": hmac_key})
+        if exposure.flat:
+            updates["HERMES_RISK_HMAC_KEY"] = secrets.token_hex(32)
+            rows.append(("HERMES_RISK_HMAC_KEY", f"GENERATED (was {why})",
+                         fingerprint(updates["HERMES_RISK_HMAC_KEY"])))
+        else:
+            rows.append(("HERMES_RISK_HMAC_KEY", f"NOT CHANGED (was {why})",
+                         fingerprint(hmac_key) if hmac_key else "-"))
+            _print_exposure(exposure)
+            errors.append(f"HERMES_RISK_HMAC_KEY is {why}, but the carry holds positions or "
+                          f"cannot be read ({exposure.verdict}): a new key would make the signed "
+                          f"carry book unreadable. Restore the key the book was signed with; "
+                          f"deploy never changes it while the carry holds anything")
     else:
         rows.append(("HERMES_RISK_HMAC_KEY", "OK", fingerprint(hmac_key)))
 
@@ -102,9 +174,25 @@ def cmd_keys(args: List[str]) -> int:
         elif shared.get(k):
             updates[k] = shared[k]
             rows.append((k, f"COPIED from {shared_path}", fingerprint(shared[k])))
+        elif system == "carry":
+            rows.append((k, "not set (the yield rotation's; not needed by the carry)", "-"))
         else:
             rows.append((k, "MISSING", "-"))
             errors.append(f"{k} is in neither {prof_path} nor {shared_path}")
+    if system == "carry":
+        dry = _carry_cfg().get("DRY_RUN") is True
+        for k in (CARRY_KEY, CARRY_SECRET):
+            if prof.get(k):
+                rows.append((k, "OK", fingerprint(prof[k])))
+            elif dry:
+                rows.append((k, "not set (DRY_RUN reads public data only)", "-"))
+            else:
+                rows.append((k, "MISSING", "-"))
+                errors.append(f"{k} missing from {prof_path} (the carry subaccount's own key)")
+        yield_key = prof.get("BYBIT_API_KEY") or shared.get("BYBIT_API_KEY")
+        if prof.get(CARRY_KEY) and prof[CARRY_KEY] == yield_key:
+            errors.append(f"{CARRY_KEY} is the yield rotation's BYBIT_API_KEY: the carry needs "
+                          f"its own subaccount and key (two systems never share an account)")
 
     tg = prof.get("TELEGRAM_BOT_TOKEN") or shared.get("TELEGRAM_BOT_TOKEN")
     rows.append(("TELEGRAM_BOT_TOKEN", "OK" if tg else "MISSING", fingerprint(tg) if tg else "-"))
@@ -166,9 +254,8 @@ def cmd_telegram_test(args: List[str]) -> int:
     return 0 if ok else 1
 
 
-def cmd_reset_state_if_invalid(args: List[str]) -> int:
-    path = settings.risk_state_file()
-    v = risk_state.verify(path, settings.load_env().get("HERMES_RISK_HMAC_KEY", ""))
+def cmd_reset_state_if_invalid(args: List[str], system: str = "yield") -> int:
+    path, v = _verify(system)
     if v.signature_valid:
         print(f"keep: {v.state} (source={v.source}, {v.code})")
         return 0
@@ -220,10 +307,9 @@ def cmd_check_cycle(args: List[str]) -> int:
     return 1 if problems else 0
 
 
-def cmd_expect_normal(args: List[str]) -> int:
-    v = risk_state.verify(settings.risk_state_file(),
-                          settings.load_env().get("HERMES_RISK_HMAC_KEY", ""))
-    print(f"risk_state: {v.state} (code={v.code}, source={v.source}, "
+def cmd_expect_normal(args: List[str], system: str = "yield") -> int:
+    _, v = _verify(system)
+    print(f"{'carry ' if system == 'carry' else ''}risk_state: {v.state} (code={v.code}, source={v.source}, "
           f"age={None if v.age_ms is None else v.age_ms // 1000}s)")
     if v.code == risk_state.CODE_OK and v.state == "NORMAL":
         return 0
@@ -271,6 +357,105 @@ def cmd_has_bot_token(args: List[str]) -> int:
     return 0 if settings.load_env().get("YIELD_TELEGRAM_BOT_TOKEN") else 1
 
 
+# --------------------------------------------------------------------------- #
+# carry                                                                         #
+# --------------------------------------------------------------------------- #
+
+def cmd_carry_dry_run_on(args: List[str]) -> int:
+    path = settings.carry_config_file()
+    try:
+        cfg = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError) as e:
+        print(f"{path}: unreadable: {e}")
+        return 1
+    value = cfg.get("DRY_RUN") if isinstance(cfg, dict) else None
+    print(f"{path}: DRY_RUN = {value!r}")
+    if value is True:
+        return 0
+    print("ERROR: DRY_RUN must be the boolean true. deploy.sh never runs the carry with anything "
+          "else; only Giannis switches to live, outside deploy.")
+    return 1
+
+
+def cmd_carry_exposure(args: List[str]) -> int:
+    e = carry_exposure()
+    _print_exposure(e)
+    return 0 if e.flat else 1
+
+
+def cmd_carry_reset_book_if_invalid(args: List[str]) -> int:
+    path = settings.carry_book_file()
+    key = settings.load_env().get("HERMES_RISK_HMAC_KEY", "")
+    if not key:
+        print("ERROR: HERMES_RISK_HMAC_KEY not set")
+        return 1
+    if not path.exists():
+        print(f"{path} absent — the first carry cycle starts an empty book")
+        return 0
+    from carry import book as carry_book
+    book, alert = carry_book.load(path, key)
+    if alert is None:
+        print(f"keep: carry book verifies ({len(book)} symbol(s))")
+        return 0
+    e = carry_exposure()
+    _print_exposure(e)
+    if not e.flat:
+        print(f"ERROR: the carry book is unreadable ({alert}) and the carry holds positions or "
+              f"cannot be read ({e.verdict}). deploy never resets the book while the exchange "
+              f"shows positions. Restore the HMAC key it was signed with, or recover with "
+              f"Telegram /adopt carry once the carry cycle reports BOOK_MISMATCH.")
+        return 1
+    aside = path.with_name(f"{path.name}.unreadable.{_stamp()}")
+    os.replace(path, aside)
+    print(f"moved the unreadable carry book ({alert}) to {aside}; the carry holds nothing")
+    return 0
+
+
+def _verify(system: str):
+    path = settings.carry_risk_state_file() if system == "carry" else settings.risk_state_file()
+    return path, risk_state.verify(path, settings.load_env().get("HERMES_RISK_HMAC_KEY", ""),
+                                   profile=risk_state.SYSTEM_PROFILES[system])
+
+
+def cmd_carry_reset_state_if_invalid(args: List[str]) -> int:
+    return cmd_reset_state_if_invalid(args, system="carry")
+
+
+def cmd_carry_expect_normal(args: List[str]) -> int:
+    return cmd_expect_normal(args, system="carry")
+
+
+def _carry_log_dir() -> Path:
+    log = _carry_cfg().get("LOG_DIR")
+    return Path(log) if isinstance(log, str) else settings.default_log_dir() / "carry"
+
+
+def cmd_carry_check_cycle(args: List[str]) -> int:
+    from heartbeat import CARRY_BLOCKING_CODES, _is_blocking_code, last_cycle_record
+
+    rec = last_cycle_record(_carry_log_dir())
+    if rec is None:
+        print(f"ERROR: no carry cycle record in {_carry_log_dir()}")
+        return 1
+    meta = rec.get("risk_state_meta") or {}
+    summary = {k: rec.get(k) for k in ("cycle_id", "risk_state", "dry_run", "alerts",
+                                       "decisions", "funding")}
+    summary["risk_state_code"] = meta.get("code")
+    print(json.dumps(summary, indent=1, ensure_ascii=False, default=str))
+    problems = [f"blocking code: {a}" for a in rec.get("alerts", [])
+                if _is_blocking_code(a, CARRY_BLOCKING_CODES)]
+    if rec.get("dry_run") is not True:
+        problems.append("dry_run is not true")
+    market = {k: v for k, v in (rec.get("snapshot_errors") or {}).items() if v != "not read"}
+    if market:
+        problems.append(f"Bybit data unavailable: {sorted(market)}")
+    if meta.get("signature_valid") is not True:
+        problems.append(f"carry risk state not verified by the cycle ({meta.get('code')})")
+    for p in problems:
+        print(f"ERROR: {p}")
+    return 1 if problems else 0
+
+
 COMMANDS = {
     "dry-run-on": cmd_dry_run_on,
     "keys": cmd_keys,
@@ -281,6 +466,12 @@ COMMANDS = {
     "regression-report": cmd_regression_report,
     "regression-ok": cmd_regression_ok,
     "has-bot-token": cmd_has_bot_token,
+    "carry-dry-run-on": cmd_carry_dry_run_on,
+    "carry-exposure": cmd_carry_exposure,
+    "carry-reset-book-if-invalid": cmd_carry_reset_book_if_invalid,
+    "carry-reset-state-if-invalid": cmd_carry_reset_state_if_invalid,
+    "carry-check-cycle": cmd_carry_check_cycle,
+    "carry-expect-normal": cmd_carry_expect_normal,
 }
 
 

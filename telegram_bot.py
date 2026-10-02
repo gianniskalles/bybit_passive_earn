@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """telegram_bot.py — operator commands over Telegram (T5.3).
 
-  /status          current risk_state (verified)
-  /unwind          ask to set UNWIND   -> reply with a one-time code
-  /resume          ask to set NORMAL   -> reply with a one-time code
+  /status          both risk states (verified) and the carry hold, if any
+  /unwind          ask to set the yield rotation to UNWIND -> one-time code
+  /resume          ask to set the yield rotation to NORMAL -> one-time code
+  /unwind carry    the same for the carry (its own risk state)
+  /resume carry    the same; an operator write also releases a CARRY_HOLD
+  /unwind all      UNWIND for both systems
   /adopt carry     ask to adopt a lost carry book (decision 13.15) -> one-time code
-  /confirm <code>  second message: writes the state with source=operator, or
+  /confirm <code>  second message: writes the state(s) with source=operator, or
                    the signed single-use carry adopt request
   /cancel          drop the pending request
 
@@ -39,7 +42,13 @@ from notify import chat_id as configured_chat_id
 
 CONFIRM_TTL_S = 120
 TARGETS = {"/unwind": "UNWIND", "/resume": "NORMAL"}
-HELP = "Commands: /status, /unwind, /resume, /adopt carry, /confirm <code>, /cancel"
+# (command, argument) -> systems. /resume all does not exist: resuming is a
+# decision per system.
+SCOPES = {("/unwind", None): ("yield",), ("/resume", None): ("yield",),
+          ("/unwind", "carry"): ("carry",), ("/resume", "carry"): ("carry",),
+          ("/unwind", "all"): ("yield", "carry")}
+HELP = ("Commands: /status, /unwind, /resume, /unwind carry, /resume carry, /unwind all, "
+        "/adopt carry, /confirm <code>, /cancel")
 
 
 class CommandBot:
@@ -48,9 +57,11 @@ class CommandBot:
                  read_status: Callable[[], str],
                  clock: Callable[[], float] = time.time,
                  new_code: Callable[[], str] = lambda: f"{secrets.randbelow(10**6):06d}",
-                 request_adopt: Optional[Callable[[str], None]] = None):
+                 request_adopt: Optional[Callable[[str], None]] = None,
+                 write_carry_state: Optional[Callable[[str, str], None]] = None):
         self.allowed = str(allowed_chat_id)
         self.write_state = write_state
+        self.writers = {"yield": write_state, "carry": write_carry_state}
         self.read_status = read_status
         self.clock = clock
         self.new_code = new_code
@@ -75,11 +86,18 @@ class CommandBot:
         if cmd == "/status":
             return chat, self.read_status()
         if cmd in TARGETS:
+            if len(words) > 2:
+                return chat, HELP
+            systems = SCOPES.get((cmd, words[1].lower() if len(words) == 2 else None))
+            if systems is None:
+                return chat, HELP
+            if any(self.writers[s] is None for s in systems):
+                return chat, "The carry risk state is not available to this bot."
             code = self.new_code()
-            self.pending = {"state": TARGETS[cmd], "code": code,
+            self.pending = {"state": TARGETS[cmd], "systems": systems, "code": code,
                             "expires": self.clock() + CONFIRM_TTL_S}
-            return chat, (f"Set risk state to {TARGETS[cmd]}? Reply /confirm {code} within "
-                          f"{CONFIRM_TTL_S // 60} min, or /cancel.")
+            return chat, (f"Set {_names(systems)} risk state to {TARGETS[cmd]}? Reply /confirm "
+                          f"{code} within {CONFIRM_TTL_S // 60} min, or /cancel.")
         if cmd == "/adopt" and words[1:] == ["carry"] and self.request_adopt is not None:
             code = self.new_code()
             self.pending = {"adopt": True, "code": code, "expires": self.clock() + CONFIRM_TTL_S}
@@ -104,12 +122,25 @@ class CommandBot:
                 return chat, ("✅ Carry adopt requested: the next carry cycle puts min(short, spot) "
                               "in the book, without a trade.")
             state = str(pending["state"])
-            try:
-                self.write_state(state, f"telegram operator command (chat {chat})")
-            except Exception as e:
-                return chat, f"❌ Could not write risk state: {e}"
-            return chat, f"✅ Risk state set to {state} (source=operator).\n{self.read_status()}"
+            done, failed = [], []
+            for system in pending["systems"]:
+                try:
+                    self.writers[system](state, f"telegram operator command (chat {chat})")
+                    done.append(system)
+                except Exception as e:
+                    failed.append(f"❌ Could not write the {_names((system,))} risk state: {e}")
+            lines = failed[:]
+            if done:
+                lines.append(f"✅ {_names(tuple(done))} risk state set to {state} (source=operator).")
+                if "carry" in done and state == "NORMAL":
+                    lines.append("A CARRY_HOLD, if any, is released at the next carry cycle.")
+            lines.append(self.read_status())
+            return chat, "\n".join(lines)
         return chat, HELP
+
+
+def _names(systems) -> str:
+    return " + ".join("yield rotation" if s == "yield" else "carry" for s in systems)
 
 
 # --------------------------------------------------------------------------- #
@@ -124,6 +155,21 @@ def _api(token: str, method: str, params: Dict, timeout: int = 40) -> Dict:
     if not payload.get("ok"):
         raise RuntimeError(f"telegram {method}: {payload}")
     return payload
+
+
+def status_text(key: str, now_ms: Optional[int] = None) -> str:
+    from carry import risk as carry_risk
+    lines = []
+    for name, path, profile in (("yield rotation", settings.risk_state_file(), risk_state.PROFILE),
+                                ("carry", settings.carry_risk_state_file(),
+                                 risk_state.CARRY_PROFILE)):
+        v = risk_state.verify(path, key, now_ms=now_ms, profile=profile)
+        age = f"{v.age_ms // 60000} min" if v.age_ms is not None else "?"
+        lines.append(f"{name}: {v.state or '-'} ({v.code}, source={v.source}, age {age})")
+    hold = carry_risk.read_hold(settings.carry_hold_file())
+    if hold:
+        lines.append(f"carry hold: {hold['reason']} — released by /resume carry (or /unwind carry)")
+    return "\n".join(lines)
 
 
 def main() -> int:
@@ -141,15 +187,18 @@ def main() -> int:
     def write_state(state: str, reason: str) -> None:
         risk_state.write(state_file, key, state, reason, risk_state.SOURCE_OPERATOR)
 
+    def write_carry_state(state: str, reason: str) -> None:
+        risk_state.write(settings.carry_risk_state_file(), key, state, reason,
+                         risk_state.SOURCE_OPERATOR, profile=risk_state.CARRY_PROFILE)
+
     def read_status() -> str:
-        v = risk_state.verify(state_file, key)
-        age = f"{v.age_ms // 60000} min" if v.age_ms is not None else "?"
-        return f"risk_state: {v.state or '-'} ({v.code}, source={v.source}, age {age})"
+        return status_text(key)
 
     def request_adopt(who: str) -> None:
         adopt.write_request(settings.carry_adopt_file(), key, who, int(time.time() * 1000))
 
-    bot = CommandBot(allowed, write_state, read_status, request_adopt=request_adopt)
+    bot = CommandBot(allowed, write_state, read_status, request_adopt=request_adopt,
+                     write_carry_state=write_carry_state)
     # Discard anything queued while the bot was down.
     backlog = _api(token, "getUpdates", {"offset": -1, "timeout": 0}).get("result", [])
     offset = backlog[-1]["update_id"] + 1 if backlog else 0

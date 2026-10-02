@@ -1,0 +1,10 @@
+[Unit]
+Description=Funding carry — heartbeat every 5 minutes (offset from the cycle)
+
+[Timer]
+OnCalendar=*:3/5
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

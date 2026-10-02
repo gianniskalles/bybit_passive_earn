@@ -2,7 +2,19 @@
 # deploy.sh — DEPLOY.md steps 1-7 in one command (run as root):
 #
 #   cd /opt/hermes/yield_rotation && sudo -u hermes git pull --ff-only origin main
-#   sudo deploy/deploy.sh
+#   sudo deploy/deploy.sh                  # the system already active (yield by default)
+#   sudo deploy/deploy.sh --system carry   # the funding carry (CARRY_PLAN)
+#   sudo deploy/deploy.sh --system yield   # back to the yield rotation
+#
+# One system at a time, never both on one account (CARRY_PLAN §13.2):
+# --system carry disables the yield rotation's timers; --system yield
+# disables the carry's, and only after `preflight carry-exposure` shows the
+# carry holds nothing. Without --system the active one is kept (the carry
+# when yield-carry-cycle.timer is enabled, else the yield rotation).
+#
+# The carry book and the HMAC key are never reset or changed while the carry
+# holds anything (exchange, paper account or book): the book is signed with
+# that key, and a new key means BOOK_UNREADABLE and a hold.
 #
 # Prints "PASS step n/7" or "FAIL step n/7" after each step's raw output,
 # stops at the first FAIL, and writes everything to
@@ -34,8 +46,23 @@ RUN_AS=${YIELD_RUN_AS:-hermes}
 INSTALL=${YIELD_INSTALL:-$REPO/deploy/install.sh}
 LOG_DIR=${YIELD_DEPLOY_LOG_DIR:-$HERMES_HOME/logs/deploy}
 CRONTAB=${YIELD_CRONTAB:-crontab}
-PAT='yield|heartbeat|run_yield_cycle'
+PAT='yield|heartbeat|run_yield_cycle|run_carry_cycle'
 TOTAL=7
+CARRY_TIMERS=(yield-carry-cycle.timer yield-carry-heartbeat.timer yield-carry-summary.timer
+              yield-carry-calibrate.timer)
+YIELD_TIMERS=(yield-cycle.timer yield-heartbeat.timer yield-summary.timer)
+
+SYSTEM=""
+while (( $# )); do
+    case $1 in
+        --system) SYSTEM=${2:-}; shift 2 || { echo "--system needs yield or carry" >&2; exit 2; } ;;
+        *) echo "unknown argument: $1 (usage: deploy.sh [--system yield|carry])" >&2; exit 2 ;;
+    esac
+done
+if [[ -n $SYSTEM && $SYSTEM != yield && $SYSTEM != carry ]]; then
+    echo "--system must be yield or carry" >&2
+    exit 2
+fi
 
 if [[ $EUID -ne 0 && ${YIELD_DEPLOY_ALLOW_NONROOT:-} != 1 ]]; then
     echo "deploy.sh must run as root: sudo $0" >&2
@@ -76,6 +103,23 @@ sysd() {  # systemctl, refusing any unit that is not ours
 
 preflight() { as_hermes "$PY" "$REPO/deploy/preflight.py" "$@"; }
 
+carry_enabled() {  # is any carry timer enabled?
+    local t
+    for t in "${CARRY_TIMERS[@]}"; do
+        [[ $(systemctl is-enabled "$t" 2>/dev/null || true) == enabled ]] && return 0
+    done
+    return 1
+}
+
+carry_must_be_flat() {  # before anything that stops the carry
+    echo "the carry timers are enabled; switching back to the yield rotation stops them"
+    if ! preflight carry-exposure; then
+        echo "REFUSED: the carry holds positions or cannot be read. Close them first"
+        echo "(Telegram /unwind carry, then wait for FLAT), then re-run with --system yield."
+        return 1
+    fi
+}
+
 run_step() {  # run_step N TITLE FUNCTION
     local n=$1 title=$2 fn=$3 rc
     echo
@@ -98,6 +142,10 @@ run_step() {  # run_step N TITLE FUNCTION
 
 step1_old_units() {
     local ours unit bad=0 cron
+    echo "system: $SYSTEM"
+    if [[ $SYSTEM == yield ]] && carry_enabled; then
+        carry_must_be_flat
+    fi
     ours=$(cd "$REPO/deploy" && ls -1 ./*.service ./*.timer | xargs -n1 basename)
     echo "never touched: hermes-gateway hermes-litellm hermes-george hermes-seo_agent (and every non-yield-* unit)"
     echo "units matching /$PAT/:"
@@ -166,6 +214,10 @@ step2_code() {
     echo "project venv: $VENV ($(as_hermes "$PY" --version 2>&1)); Hermes CLI: $HERMES_BIN"
     as_hermes "$PY" -m pip install -q -r requirements.txt -r requirements-dev.txt
     as_hermes "$PY" -m pytest -q -p no:cacheprovider
+    if [[ $SYSTEM == carry ]]; then
+        echo "carry: no LLM anywhere — the agent CLI is not checked"
+        return 0
+    fi
     help=$(as_hermes "$HERMES_BIN" chat --help 2>&1) || { echo "$help"; return 1; }
     for flag in --query-file --toolsets -Q -m --reasoning; do
         if grep -qF -- "$flag" <<<"$help"; then
@@ -176,11 +228,14 @@ step2_code() {
     done
 }
 
-step3_keys() { preflight keys; }
+step3_keys() {
+    if [[ $SYSTEM == carry ]]; then preflight keys --system carry; else preflight keys; fi
+}
 
 step4_telegram() { preflight telegram-test; }
 
 step5_state_and_cycle() {
+    if [[ $SYSTEM == carry ]]; then step5_carry; return; fi
     preflight dry-run-on   # before anything else in this step
     preflight reset-state-if-invalid
     as_hermes "$PY" heartbeat.py
@@ -191,8 +246,24 @@ step5_state_and_cycle() {
     preflight expect-normal
 }
 
+step5_carry() {
+    preflight carry-dry-run-on   # before anything else in this step
+    preflight carry-reset-state-if-invalid
+    preflight carry-reset-book-if-invalid   # never while the carry holds anything
+    as_hermes "$PY" heartbeat.py --system carry
+    echo "--- manual carry cycle (DRY_RUN: paper account, public market data) ---"
+    as_hermes "$PY" run_carry_cycle.py
+    preflight carry-check-cycle
+    as_hermes "$PY" heartbeat.py --system carry
+    preflight carry-expect-normal
+}
+
 step6_regression() {
     local report
+    if [[ $SYSTEM == carry ]]; then
+        echo "carry: no LLM, no prompt — nothing to regress"
+        return 0
+    fi
     report=$(preflight regression-report)
     [[ -n $report ]] || { echo "no report path"; return 1; }
     if preflight regression-ok "$report"; then
@@ -205,25 +276,45 @@ step6_regression() {
 }
 
 step7_systemd() {
-    local t
-    preflight dry-run-on   # no timer is installed for a live config
+    local t on off bot=()
+    if [[ $SYSTEM == carry ]]; then
+        preflight carry-dry-run-on   # no timer is installed for a live config
+        on=("${CARRY_TIMERS[@]}"); off=("${YIELD_TIMERS[@]}")
+    else
+        preflight dry-run-on
+        on=("${YIELD_TIMERS[@]}"); off=("${CARRY_TIMERS[@]}")
+        if carry_enabled; then
+            carry_must_be_flat   # again, right before stopping it
+            for t in "${CARRY_TIMERS[@]}"; do sysd disable --now "$t"; done
+        fi
+    fi
     if preflight has-bot-token; then
-        bash "$INSTALL" --with-bot
+        bot=(--with-bot)
     else
         echo "YIELD_TELEGRAM_BOT_TOKEN not set — Telegram commands bot not installed"
-        bash "$INSTALL"
     fi
+    bash "$INSTALL" --system "$SYSTEM" "${bot[@]}"
     systemd-analyze verify /etc/systemd/system/yield-*.service /etc/systemd/system/yield-*.timer
-    for t in yield-cycle.timer yield-heartbeat.timer yield-summary.timer; do
+    for t in "${on[@]}"; do
         echo "$t: $(systemctl is-enabled "$t") / $(systemctl is-active "$t")"
         [[ $(systemctl is-active "$t") == active ]] || return 1
+    done
+    for t in "${off[@]}"; do   # never both systems
+        echo "$t: $(systemctl is-enabled "$t" 2>/dev/null || true) / $(systemctl is-active "$t" 2>/dev/null || true)"
+        [[ $(systemctl is-active "$t" 2>/dev/null || true) != active ]] || return 1
     done
     systemctl list-timers 'yield-*' --no-pager
 }
 
 # --------------------------------------------------------------------------- #
 
-echo "deploy.sh — $(date -u +%FT%TZ) — repo $REPO — log $LOG"
+if [[ -z $SYSTEM ]]; then
+    if carry_enabled; then SYSTEM=carry; else SYSTEM=yield; fi
+fi
+DRY_CHECK=dry-run-on
+[[ $SYSTEM == carry ]] && DRY_CHECK=carry-dry-run-on
+
+echo "deploy.sh — $(date -u +%FT%TZ) — repo $REPO — system $SYSTEM — log $LOG"
 run_step 1 "stop the old cycle/heartbeat (yield-* only)" step1_old_units
 run_step 2 "code, dependencies, tests, agent CLI flags" step2_code
 run_step 3 "keys in /opt/hermes/.env (fingerprints only)" step3_keys
@@ -233,10 +324,14 @@ run_step 6 "LLM regression of the production prompt (before any timer)" step6_re
 run_step 7 "systemd units and timers" step7_systemd
 echo
 echo "===== FINAL CHECK ====="
-if ! preflight dry-run-on; then
+if ! preflight "$DRY_CHECK"; then
     echo "FAIL final check: the config no longer says DRY_RUN: true"
     echo "DEPLOY STOPPED at the final check. Paste this log: $LOG"
     exit 1
 fi
-echo "ALL $TOTAL STEPS PASSED — timers running, DRY_RUN: true (verified by the final check above)."
-echo "Next: the 7-day dry-run. Testnet is NOT part of this script and waits for Giannis. Log: $LOG"
+echo "ALL $TOTAL STEPS PASSED — $SYSTEM timers running, DRY_RUN: true (verified by the final check above)."
+if [[ $SYSTEM == carry ]]; then
+    echo "Next: 14 days of paper trading (CARRY_PLAN §10). Testnet is NOT part of this script and waits for Giannis. Log: $LOG"
+else
+    echo "Next: the 7-day dry-run. Testnet is NOT part of this script and waits for Giannis. Log: $LOG"
+fi

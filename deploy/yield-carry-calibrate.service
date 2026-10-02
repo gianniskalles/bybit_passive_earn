@@ -1,0 +1,18 @@
+[Unit]
+Description=Funding carry — monthly re-measurement with a Telegram report (decision 13.7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes/yield_rotation
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ExecStart=/opt/hermes/venvs/yield_rotation/bin/python /opt/hermes/yield_rotation/tools/carry_monthly.py
+# 180 days of public data and the calibration grid; public endpoints only.
+TimeoutStartSec=3600

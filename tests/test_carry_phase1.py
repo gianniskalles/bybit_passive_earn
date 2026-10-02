@@ -20,9 +20,10 @@ REPO = Path(__file__).resolve().parent.parent
 SHIPPED = REPO / "config" / "carry.yaml"
 TESTNET = REPO / "config" / "carry.testnet.yaml"
 
-# The dead-man URL (before live, 13.11): null, so the cycle refuses to start
-# until set.
-UNSET_IN_SHIPPED = {"DEADMAN_URL"}
+# The dead-man URL (13.9): null until just before live. Under DRY_RUN the
+# paper cycle runs without it (Phase 6, so the 14-day paper run can start);
+# a live config refuses to start while it is unset.
+UNSET_IN_SHIPPED = set()
 
 
 def complete(**over):
@@ -47,6 +48,13 @@ def test_shipped_config_is_dry_run_and_lists_exactly_the_unset_decisions():
     errors = cc.validate(cfg, testnet=False)
     assert keys_of(errors) == UNSET_IN_SHIPPED
     assert all("unset" in e for e in errors)
+
+
+def test_live_config_refuses_to_start_without_the_deadman_url():
+    cfg = yaml.safe_load(SHIPPED.read_text())
+    assert cfg["DEADMAN_URL"] is None
+    assert cc.validate(cfg, testnet=False) == []                       # paper trading
+    assert keys_of(cc.validate(dict(cfg, DRY_RUN=False), testnet=False)) == {"DEADMAN_URL"}
 
 
 def test_complete_config_is_valid():
