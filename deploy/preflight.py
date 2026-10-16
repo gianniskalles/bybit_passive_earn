@@ -65,7 +65,9 @@ from notify import Notifier, send_telegram  # noqa: E402
 
 SMOKE_MARKER = "smoke-test"
 MIN_HMAC_LEN = 32
-CARRY_KEY, CARRY_SECRET = "BYBIT_CARRY_API_KEY", "BYBIT_CARRY_API_SECRET"
+# Deploy only ever looks at mainnet: the mainnet names, never the testnet ones.
+CARRY_KEY, CARRY_SECRET = settings.carry_api_key_names(testnet_=False)
+TESTNET_KEY, TESTNET_SECRET = settings.carry_api_key_names(testnet_=True)
 
 
 def fingerprint(value: str) -> str:
@@ -193,6 +195,12 @@ def cmd_keys(args: List[str]) -> int:
         if prof.get(CARRY_KEY) and prof[CARRY_KEY] == yield_key:
             errors.append(f"{CARRY_KEY} is the yield rotation's BYBIT_API_KEY: the carry needs "
                           f"its own subaccount and key (two systems never share an account)")
+        tk = prof.get(TESTNET_KEY)
+        rows.append((TESTNET_KEY, "set (testnet only; deploy never uses it)" if tk else "not set",
+                     fingerprint(tk) if tk else "-"))
+        if tk and tk in (prof.get(CARRY_KEY), yield_key):
+            errors.append(f"{TESTNET_KEY} is the same key as a mainnet one: the testnet key goes "
+                          f"only in {TESTNET_KEY}/{TESTNET_SECRET}")
 
     tg = prof.get("TELEGRAM_BOT_TOKEN") or shared.get("TELEGRAM_BOT_TOKEN")
     rows.append(("TELEGRAM_BOT_TOKEN", "OK" if tg else "MISSING", fingerprint(tg) if tg else "-"))

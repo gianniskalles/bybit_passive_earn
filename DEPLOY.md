@@ -204,7 +204,13 @@ tail -n 1 /opt/hermes/logs/carry/$(date -u +%F).jsonl | $PY -m json.tool | head 
 σύμβολο, π.χ. `ETH: 2,6% — χρειάζεται 6,7% (5% πάνω από το Earn 1,7%)`.
 
 **Μετά το deploy:** 14 ημέρες paper trading (CARRY_PLAN §10). Testnet μόνο με
-έγκριση του Giannis.
+έγκριση του Giannis. Με `BYBIT_TESTNET=1` το carry γράφει μόνο στο
+`/opt/hermes/state/carry-testnet/` και στο `/opt/hermes/logs/carry-testnet`
+(config `carry.testnet.yaml`)· τα αρχεία του mainnet δεν τα αγγίζει, και με
+το config του mainnet αρνείται να τρέξει. Υπογράφει **μόνο** με
+`BYBIT_CARRY_TESTNET_API_KEY` / `_SECRET` (ποτέ με το `BYBIT_CARRY_API_KEY`), και
+ο κύκλος του mainnet ποτέ με αυτά· το βήμα 3 αποτυγχάνει αν το κλειδί testnet
+είναι ίδιο με κλειδί του mainnet.
 
 ## Carry — τι κάνει ο Giannis στο Bybit UI (και πουθενά αλλού)
 
@@ -234,7 +240,8 @@ tail -n 1 /opt/hermes/logs/carry/$(date -u +%F).jsonl | $PY -m json.tool | head 
    του subaccount. Το κλειδί δεν μπορεί να κάνει transfer. Κανένα ETH ή άλλο
    νόμισμα στο subaccount: ό,τι δεν είναι στο book είναι `FOREIGN_BALANCE`.
 9. **Testnet, όταν το εγκρίνεις.** Τα ίδια 1–7 στο testnet.bybit.com, με
-   ξεχωριστό κλειδί testnet.
+   ξεχωριστό κλειδί testnet, που μπαίνει **μόνο** στα
+   `BYBIT_CARRY_TESTNET_API_KEY` / `BYBIT_CARRY_TESTNET_API_SECRET`.
 
 Το κλειδί (βήμα 7) το δίνεις στον Hermes για το `/opt/hermes/.env` ως
 `BYBIT_CARRY_API_KEY` / `BYBIT_CARRY_API_SECRET`. Το `DRY_RUN: false` και το

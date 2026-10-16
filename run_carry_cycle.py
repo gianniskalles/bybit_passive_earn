@@ -46,7 +46,6 @@ from carry import snapshot as snapshot_mod
 from carry.paper import PaperExchange
 from carry.plan import FLAT, OPEN, plan_cycle
 
-CARRY_KEY, CARRY_SECRET = "BYBIT_CARRY_API_KEY", "BYBIT_CARRY_API_SECRET"
 CONSERVATIVE = {"NORMAL": 0, "NO_NEW_POSITIONS": 1, "UNWIND": 2}
 LEDGER_LOOKBACK_MS = 15 * 86_400_000
 
@@ -167,6 +166,7 @@ def run_cycle(cfg: Optional[Dict], env: Dict[str, str], client, *,
 def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_fn, public,
            clock, sleep, paper_start, exchange, log_dir) -> int:
     testnet = bool(getattr(client, "testnet", False))
+    rec["testnet"] = testnet
     errors = [config_error] if config_error else cc.validate(
         cfg, testnet, alt_report=cc.read_alt_report(cc.ALT_REPORT_FILE))
     if errors:
@@ -299,19 +299,20 @@ def notify_cycle(rec: Dict, notifier) -> None:
     from heartbeat import CARRY_BLOCKING_CODES, _is_blocking_code
     blocking = sorted({c for c in (_is_blocking_code(a, CARRY_BLOCKING_CODES)
                                    for a in rec.get("alerts", [])) if c})
+    name = "CARRY TESTNET" if rec.get("testnet") else "CARRY"
     notifier.observe("carry_cycle", ",".join(blocking) or None,
-                     f"🚨 CARRY {rec.get('cycle_id')}: {', '.join(blocking)}. "
+                     f"🚨 {name} {rec.get('cycle_id')}: {', '.join(blocking)}. "
                      f"Alerts: {'; '.join(rec.get('alerts', []))[:1500]}",
-                     resolved_text="✅ CARRY: no blocking codes any more")
+                     resolved_text=f"✅ {name}: no blocking codes any more")
     state = rec.get("risk_state")
     notifier.observe("carry_risk_state", None if state == "NORMAL" else state,
-                     f"⚠️ CARRY RISK STATE {state}: no new positions",
-                     resolved_text="✅ CARRY risk state back to NORMAL")
+                     f"⚠️ {name} RISK STATE {state}: no new positions",
+                     resolved_text=f"✅ {name} risk state back to NORMAL")
     if not rec.get("dry_run"):
         for o in rec.get("orders", []):
             if o.get("filled"):
                 req = o.get("request") or {}
-                notifier.event(f"✅ CARRY ORDER {req.get('category')} {req.get('side')} "
+                notifier.event(f"✅ {name} ORDER {req.get('category')} {req.get('side')} "
                                f"{o.get('filled')} {req.get('symbol')} @ {o.get('avg_price')} "
                                f"(slippage {o.get('slippage_bps')} bps)")
 
@@ -320,16 +321,24 @@ def main() -> int:
     from carry.client import CarryClient
     from notify import Notifier
     env = settings.load_env()
+    testnet = settings.testnet()
     cfg, error = None, None
     try:
-        cfg = cc.load(settings.carry_config_file(),
-                      testnet=env.get("BYBIT_TESTNET", "").lower() in ("1", "true", "yes"))
+        cfg = cc.load(settings.carry_config_file(), testnet=testnet)
     except cc.CarryConfigError as e:
         error = str(e)
+    if testnet and cfg is not None and cfg.get("TESTNET_ONLY") is not True:
+        # A testnet run with a mainnet config would write the mainnet LOG_DIR
+        # (cycle records the mainnet heartbeat reads, ledger).
+        cfg, error = None, (f"{settings.carry_config_file()}: BYBIT_TESTNET is set but the config "
+                            f"is not TESTNET_ONLY; testnet runs use config/carry.testnet.yaml")
     # Its own key, for its own subaccount (CARRY_PLAN §3.6, 0A). Never the
-    # yield rotation's BYBIT_API_KEY: two systems never share an account.
-    client = CarryClient(api_key=env.get(CARRY_KEY), api_secret=env.get(CARRY_SECRET))
-    lock_path = settings.hermes_home() / "state" / "carry_cycle.lock"
+    # yield rotation's BYBIT_API_KEY: two systems never share an account; and
+    # on testnet only the testnet variables (settings.carry_api_key_names).
+    key_name, secret_name = settings.carry_api_key_names(testnet)
+    client = CarryClient(api_key=env.get(key_name), api_secret=env.get(secret_name),
+                         testnet=testnet)
+    lock_path = settings.carry_cycle_file().with_name("carry_cycle.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as lock:
         try:
