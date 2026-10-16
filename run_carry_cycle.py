@@ -166,6 +166,7 @@ def run_cycle(cfg: Optional[Dict], env: Dict[str, str], client, *,
 def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_fn, public,
            clock, sleep, paper_start, exchange, log_dir) -> int:
     testnet = bool(getattr(client, "testnet", False))
+    rec["testnet"] = testnet
     errors = [config_error] if config_error else cc.validate(
         cfg, testnet, alt_report=cc.read_alt_report(cc.ALT_REPORT_FILE))
     if errors:
@@ -298,19 +299,20 @@ def notify_cycle(rec: Dict, notifier) -> None:
     from heartbeat import CARRY_BLOCKING_CODES, _is_blocking_code
     blocking = sorted({c for c in (_is_blocking_code(a, CARRY_BLOCKING_CODES)
                                    for a in rec.get("alerts", [])) if c})
+    name = "CARRY TESTNET" if rec.get("testnet") else "CARRY"
     notifier.observe("carry_cycle", ",".join(blocking) or None,
-                     f"🚨 CARRY {rec.get('cycle_id')}: {', '.join(blocking)}. "
+                     f"🚨 {name} {rec.get('cycle_id')}: {', '.join(blocking)}. "
                      f"Alerts: {'; '.join(rec.get('alerts', []))[:1500]}",
-                     resolved_text="✅ CARRY: no blocking codes any more")
+                     resolved_text=f"✅ {name}: no blocking codes any more")
     state = rec.get("risk_state")
     notifier.observe("carry_risk_state", None if state == "NORMAL" else state,
-                     f"⚠️ CARRY RISK STATE {state}: no new positions",
-                     resolved_text="✅ CARRY risk state back to NORMAL")
+                     f"⚠️ {name} RISK STATE {state}: no new positions",
+                     resolved_text=f"✅ {name} risk state back to NORMAL")
     if not rec.get("dry_run"):
         for o in rec.get("orders", []):
             if o.get("filled"):
                 req = o.get("request") or {}
-                notifier.event(f"✅ CARRY ORDER {req.get('category')} {req.get('side')} "
+                notifier.event(f"✅ {name} ORDER {req.get('category')} {req.get('side')} "
                                f"{o.get('filled')} {req.get('symbol')} @ {o.get('avg_price')} "
                                f"(slippage {o.get('slippage_bps')} bps)")
 

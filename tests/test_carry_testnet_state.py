@@ -184,3 +184,23 @@ def test_preflight_shows_the_testnet_key_and_refuses_a_shared_one(isolated_paths
                    "BYBIT_CARRY_TESTNET_API_KEY=same\nBYBIT_CARRY_TESTNET_API_SECRET=ts\n")
     assert preflight.main(["keys", "--system", "carry"]) == 1
     assert "same key as a mainnet one" in capsys.readouterr().out
+
+
+# --- Telegram: testnet alerts never mix with mainnet ones --------------------------- #
+
+def test_testnet_notify_state_is_separate(isolated_paths, monkeypatch):
+    monkeypatch.delenv("YIELD_NOTIFY_STATE", raising=False)
+    mainnet = settings.notify_state_file()
+    monkeypatch.setenv("BYBIT_TESTNET", "1")
+    assert settings.notify_state_file() != mainnet
+    assert settings.notify_state_file().parent.name == "carry-testnet"
+
+
+def test_testnet_alerts_say_testnet(tmp_path):
+    from notify import Notifier
+    sent = []
+    n = Notifier({"TELEGRAM_BOT_TOKEN": "t", "ALERT_TELEGRAM_CHAT_ID": "1"}, {},
+                 sender=lambda t, c, x: sent.append(x) or True, state_file=tmp_path / "n.json")
+    rcc.notify_cycle({"cycle_id": "c1", "alerts": ["ORPHAN_LEG: x"], "risk_state": "NORMAL",
+                      "testnet": True, "dry_run": True}, n)
+    assert sent and sent[0].startswith("🚨 CARRY TESTNET c1")

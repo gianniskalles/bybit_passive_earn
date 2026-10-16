@@ -8,7 +8,8 @@
 TESTNET_ONLY: true
 SYMBOLS: [ETHUSDT]
 CYCLE_MINUTES: 5
-DRY_RUN: true                          # how the testnet run executes orders is Phase 6 (testnet only)
+DRY_RUN: true                          # true = paper on testnet data; real testnet orders
+                                       # need false, set only by Giannis (§10)
 LOG_DIR: /opt/hermes/logs/carry-testnet
 ACCOUNT_TYPE: UNIFIED
 EARN_COIN: USDT

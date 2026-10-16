@@ -14,7 +14,8 @@ Path overrides (all optional; defaults match the VPS layout):
   YIELD_HERMES_BIN       $YIELD_HERMES_HOME/.venv/bin/hermes
   YIELD_ENV_FILE         $YIELD_HERMES_HOME/.env      (profile secrets)
   YIELD_SHARED_ENV_FILE  /opt/data/.env               (shared; TELEGRAM_BOT_TOKEN only)
-  YIELD_NOTIFY_STATE     $YIELD_HERMES_HOME/state/notify_state.json (Telegram dedup)
+  YIELD_NOTIFY_STATE     $YIELD_HERMES_HOME/state/notify_state.json (Telegram dedup;
+                         on testnet <carry state>/notify_state.json)
   YIELD_CARRY_CONFIG_FILE  <repo>/config/carry.yaml   (testnet: config/carry.testnet.yaml)
   YIELD_CARRY_STATE_FILE   <carry state>/carry_risk_state.json
   YIELD_CARRY_ADOPT_FILE   <carry state>/carry_adopt_request.json
@@ -135,7 +136,10 @@ def carry_cycle_file() -> Path:
 
 
 def notify_state_file() -> Path:
-    return _path("YIELD_NOTIFY_STATE", hermes_home() / "state" / "notify_state.json")
+    """Telegram dedup state. On testnet its own file, so a testnet alert never
+    resolves or repeats a mainnet one."""
+    base = carry_state_dir() if testnet() else hermes_home() / "state"
+    return _path("YIELD_NOTIFY_STATE", base / "notify_state.json")
 
 
 def load_env_file(path: Path) -> Dict[str, str]:

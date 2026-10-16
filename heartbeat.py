@@ -253,14 +253,15 @@ def main(argv=None) -> int:
     except Exception:
         pass  # reported by _decide
     rc, condition, text = _decide(env, system)
+    label = system.name + (" testnet" if system.name == "carry" and settings.testnet() else "")
     if condition and system.name != "yield":
-        text = f"[{system.name}] {text}"
+        text = f"[{label}] {text}"
     notifier = Notifier(env, cfg if isinstance(cfg, dict) else {},
                         sender=lambda t, c, x: send_telegram_alert(t, c, x))
     channel = "heartbeat" if system.name == "yield" else f"heartbeat:{system.name}"
     notifier.observe(channel, condition, text,
                      resolved_text=None if condition else
-                     f"✅ HEARTBEAT{'' if system.name == 'yield' else f' [{system.name}]'}: back to normal")
+                     f"✅ HEARTBEAT{'' if system.name == 'yield' else f' [{label}]'}: back to normal")
     return rc
 
 
