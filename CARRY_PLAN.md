@@ -504,4 +504,9 @@ DEADMAN_URL: null                # εξωτερικός έλεγχος ζωής 
     είναι στο `state/carry-testnet/`, και το default config είναι το
     `carry.testnet.yaml` (δικό του `LOG_DIR`). Κύκλος testnet με config που δεν
     είναι `TESTNET_ONLY` → `CONFIG_INCOMPLETE`. Τα paths του mainnet δεν αλλάζουν.
+18. **16/10 — ο χωρισμός εγκρίνεται.** Το κλειδί του testnet σε ξεχωριστές
+    μεταβλητές, `BYBIT_CARRY_TESTNET_API_KEY` / `_SECRET`, ώστε ένα κλειδί testnet
+    να μην κάθεται ποτέ στη θέση του πραγματικού. Ο κύκλος και το
+    `scripts/testnet.py carry-capture` στο testnet διαβάζουν μόνο αυτές· ο κύκλος
+    του mainnet μόνο τις `BYBIT_CARRY_API_KEY/_SECRET`· κανένα fallback.
 

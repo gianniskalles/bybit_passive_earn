@@ -385,7 +385,8 @@ pytest                                   # οπουδήποτε· CI σε κάθ
   - **Εγκρίθηκε 2/10· merge στο `main`.** Πριν το testnet: με `BYBIT_TESTNET`
     όλα τα αρχεία state του carry στο `state/carry-testnet/` και config το
     `carry.testnet.yaml` (δικό του `LOG_DIR`)· testnet με config που δεν είναι
-    `TESTNET_ONLY` → `CONFIG_INCOMPLETE`.
+    `TESTNET_ONLY` → `CONFIG_INCOMPLETE`. Κλειδί testnet μόνο στα
+    `BYBIT_CARRY_TESTNET_API_KEY/_SECRET` (`settings.carry_api_key_names`).
   - Testnet μόνο με έγκριση του Giannis.
 
 ## 9. Ανοιχτά — τι μένει

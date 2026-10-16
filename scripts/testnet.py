@@ -101,9 +101,10 @@ def carry_capture() -> Path:
     env = settings.load_env()
     if not _truthy(env.get("BYBIT_TESTNET")):
         raise SystemExit("refusing: BYBIT_TESTNET is not set to 1 (this script is testnet-only)")
-    key, secret = env.get("BYBIT_CARRY_API_KEY"), env.get("BYBIT_CARRY_API_SECRET")
+    key_name, secret_name = settings.carry_api_key_names(testnet_=True)
+    key, secret = env.get(key_name), env.get(secret_name)
     if not (key and secret):
-        raise SystemExit("BYBIT_CARRY_API_KEY / BYBIT_CARRY_API_SECRET (testnet) not set")
+        raise SystemExit(f"{key_name} / {secret_name} not set (the carry's testnet key)")
     import yaml
     cfg = yaml.safe_load((ROOT / "config" / "carry.yaml").read_text())
     session = RecordingSession()

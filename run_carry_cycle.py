@@ -46,7 +46,6 @@ from carry import snapshot as snapshot_mod
 from carry.paper import PaperExchange
 from carry.plan import FLAT, OPEN, plan_cycle
 
-CARRY_KEY, CARRY_SECRET = "BYBIT_CARRY_API_KEY", "BYBIT_CARRY_API_SECRET"
 CONSERVATIVE = {"NORMAL": 0, "NO_NEW_POSITIONS": 1, "UNWIND": 2}
 LEDGER_LOOKBACK_MS = 15 * 86_400_000
 
@@ -332,8 +331,10 @@ def main() -> int:
         cfg, error = None, (f"{settings.carry_config_file()}: BYBIT_TESTNET is set but the config "
                             f"is not TESTNET_ONLY; testnet runs use config/carry.testnet.yaml")
     # Its own key, for its own subaccount (CARRY_PLAN §3.6, 0A). Never the
-    # yield rotation's BYBIT_API_KEY: two systems never share an account.
-    client = CarryClient(api_key=env.get(CARRY_KEY), api_secret=env.get(CARRY_SECRET),
+    # yield rotation's BYBIT_API_KEY: two systems never share an account; and
+    # on testnet only the testnet variables (settings.carry_api_key_names).
+    key_name, secret_name = settings.carry_api_key_names(testnet)
+    client = CarryClient(api_key=env.get(key_name), api_secret=env.get(secret_name),
                          testnet=testnet)
     lock_path = settings.carry_cycle_file().with_name("carry_cycle.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)

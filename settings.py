@@ -22,6 +22,10 @@ Path overrides (all optional; defaults match the VPS layout):
   YIELD_CARRY_PAPER_FILE   <carry state>/carry_paper.json   (DRY_RUN account)
   YIELD_CARRY_HOLD_FILE    <carry state>/carry_hold.json    (NO_NEW_POSITIONS latch)
   YIELD_CARRY_CYCLE_FILE   <carry state>/carry_cycle.json   (last cycle time, and the lock)
+  The carry's Bybit key (carry_api_key_names): BYBIT_CARRY_API_KEY/_SECRET
+  on mainnet, BYBIT_CARRY_TESTNET_API_KEY/_SECRET on testnet — a testnet key
+  never sits where the real one is read, and neither is ever used for the
+  other network.
   <carry state> = $YIELD_HERMES_HOME/state on mainnet, and
                   $YIELD_HERMES_HOME/state/carry-testnet when BYBIT_TESTNET is set
                   (the same switch as the Bybit client's): a testnet run never
@@ -38,7 +42,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Mapping, Optional
+from typing import Dict, Mapping, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent
 
@@ -87,6 +91,13 @@ def shared_env_file() -> Path:
 def testnet() -> bool:
     """BYBIT_TESTNET as the Bybit client reads it (process env > profile .env)."""
     return str(load_env().get("BYBIT_TESTNET") or "").strip().lower() in ("1", "true", "yes")
+
+
+def carry_api_key_names(testnet_: Optional[bool] = None) -> Tuple[str, str]:
+    """The env names of the carry's own key for this network (no fallback)."""
+    if testnet() if testnet_ is None else testnet_:
+        return "BYBIT_CARRY_TESTNET_API_KEY", "BYBIT_CARRY_TESTNET_API_SECRET"
+    return "BYBIT_CARRY_API_KEY", "BYBIT_CARRY_API_SECRET"
 
 
 def carry_config_file() -> Path:
