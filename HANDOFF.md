@@ -388,6 +388,14 @@ pytest                                   # οπουδήποτε· CI σε κάθ
     `TESTNET_ONLY` → `CONFIG_INCOMPLETE`. Κλειδί testnet μόνο στα
     `BYBIT_CARRY_TESTNET_API_KEY/_SECRET` (`settings.carry_api_key_names`).
   - Testnet μόνο με έγκριση του Giannis.
+- ✅ **16/10 — heartbeat (VPS: `RISK_STATE_STALE`×22 σε 24 ώρες, 2 μηνύματα το
+  καθένα):** ο heartbeat ανανεώνει ένα NORMAL μόλις η ηλικία του ξεπεράσει το
+  μισό του ορίου (15'), με τους ίδιους όρους (κανένας blocking κωδικός, API,
+  υπογραφή, ζωντανός scanner)· όχι πια μετά τη λήξη. Αλλαγή κατάστασης στο
+  Telegram μόνο αν κρατήσει 2 συνεχόμενους κύκλους (yield και carry). Αν
+  σταματήσει ο heartbeat, τίποτα άλλο δεν ανανεώνει: λήγει σε 30'.
+  `tests/test_heartbeat_renewal.py`: 24 ώρες προσομοίωσης με τον πραγματικό
+  κύκλο και heartbeat → 0 stale, 0 μηνύματα (ο παλιός κανόνας: 17–40 stale).
 
 ## 9. Ανοιχτά — τι μένει
 

@@ -46,6 +46,8 @@ from carry import snapshot as snapshot_mod
 from carry.paper import PaperExchange
 from carry.plan import FLAT, OPEN, plan_cycle
 
+# A risk-state change is announced only once it has held this many cycles.
+STATE_CONFIRM_CYCLES = 2
 CONSERVATIVE = {"NORMAL": 0, "NO_NEW_POSITIONS": 1, "UNWIND": 2}
 LEDGER_LOOKBACK_MS = 15 * 86_400_000
 
@@ -307,7 +309,8 @@ def notify_cycle(rec: Dict, notifier) -> None:
     state = rec.get("risk_state")
     notifier.observe("carry_risk_state", None if state == "NORMAL" else state,
                      f"⚠️ {name} RISK STATE {state}: no new positions",
-                     resolved_text=f"✅ {name} risk state back to NORMAL")
+                     resolved_text=f"✅ {name} risk state back to NORMAL",
+                     confirm=STATE_CONFIRM_CYCLES)
     if not rec.get("dry_run"):
         for o in rec.get("orders", []):
             if o.get("filled"):
