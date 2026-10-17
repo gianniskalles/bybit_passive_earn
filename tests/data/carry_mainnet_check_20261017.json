@@ -1,5 +1,5 @@
 {
-  "_comment": "REAL mainnet output of scripts/mainnet_roundtrip.py --check, 2026-10-17 (Hermes, carry subaccount, One-Way confirmed in the UI; 0 USDT in the UTA, all in Earn, the app shows 'Margin Balance: --'). `check_problems` and `check_entry` are verbatim. `position_list_ETHUSDT` is parsed from the refusal text (the Python repr Bybit's rows were printed with) — tests/test_carry_mainnet_check.py checks it is exactly that. No raw wallet-balance body was recorded (raw/ did not exist yet); `wallet_balance_reconstructed` is built from what the output proves: accountMMRate empty, 0 USDT in the UTA.",
+  "_comment": "REAL mainnet outputs of scripts/mainnet_roundtrip.py --check, 2026-10-17 (Hermes, carry subaccount, One-Way confirmed in the UI; all USDT in Earn, only dust in the UTA). First run: `check_problems` and `check_entry` are verbatim; `position_list_ETHUSDT` is parsed from that refusal text (the Python repr Bybit's rows were printed with) — tests/test_carry_mainnet_check.py checks it is exactly that. Second run (after the position fix): `check2_problems`/`check2_entry` verbatim, and `raw_wallet_balance` is the line the response recorder wrote to /opt/hermes/logs/carry/raw/ — the real wallet-balance body. The pasted line ended in '}]}}}', two characters short of valid JSON; the closing ']}' of result.list was restored (no value changed).",
   "check_problems": [
     "the carry is not FLAT (UNKNOWN): book: empty / all FLAT; paper account: nothing held; exchange unreadable: account: Unreadable: wallet-balance: accountMMRate missing; exchange unreadable: positions:ETHUSDT: Unreadable: position ETHUSDT: hedge-mode rows [{'symbol': 'ETHUSDT', 'leverage': '3', 'breakEvenPrice': '', 'autoAddMargin': 0, 'avgPrice': '0', 'liqPrice': '', 'riskLimitValue': '300000', 'takeProfit': '', 'positionValue': '', 'isReduceOnly': False, 'positionIMByMp': '', 'tpslMode': 'Full', 'riskId': 11, 'trailingStop': '0', 'unrealisedPnl': '', 'markPrice': '2418.62', 'adlRankIndicator': 0, 'cumRealisedPnl': '-0.17640124', 'positionMM': '', 'createdTime': '1779039363883', 'positionIdx': 0, 'openTime': 0, 'positionIM': '', 'positionMMByMp': '', 'seq': 411933266361, 'updatedTime': '1783373451978', 'side': '', 'bustPrice': '', 'positionBalance': '0', 'leverageSysUpdatedTime': '', 'curRealisedPnl': '0', 'size': '0', 'positionStatus': 'Normal', 'mmrSysUpdatedTime': '', 'stopLoss': '', 'tradeMode': 0, 'sessionAvgPrice': '', 'netDeltaRatio': ''}, {'symbol': 'ETHUSDT', 'leverage': '10', 'autoAddMargin': 0, 'avgPrice': '', 'liqPrice': '', 'riskLimitValue': '300000', 'takeProfit': '', 'positionValue': '', 'isReduceOnly': False, 'positionIMByMp': '', 'tpslMode': '', 'isReduceOnly': False, 'riskId': 11, 'trailingStop': '', 'unrealisedPnl': '', 'markPrice': '', 'adlRankIndicator': 0, 'cumRealisedPnl': '', 'positionMM': '', 'createdTime': '', 'positionIdx': 0, 'positionIM': '', 'positionMMByMp': '', 'seq': -1, 'updatedTime': '', 'side': '', 'bustPrice': '', 'positionBalance': '', 'leverageSysUpdatedTime': '', 'curRealisedPnl': '', 'size': '0', 'positionStatus': '', 'mmrSysUpdatedTime': '', 'stopLoss': '', 'tradeMode': 0, 'sessionAvgPrice': ''}]; one-way mode is required",
     "account unreadable"
@@ -90,15 +90,136 @@
       "sessionAvgPrice": ""
     }
   ],
-  "wallet_balance_reconstructed": {
-    "list": [
-      {
-        "accountType": "UNIFIED",
-        "accountIMRate": "",
-        "accountMMRate": "",
-        "totalEquity": "0",
-        "coin": []
+  "check2_problems": [
+    "the carry is not FLAT (UNKNOWN): book: empty / all FLAT; paper account: nothing held; exchange unreadable: account: Unreadable: wallet-balance: accountMMRate missing",
+    "account unreadable"
+  ],
+  "check2_entry": {
+    "perp_qty": 0.01,
+    "min_notional": 24.2296626,
+    "usdt_needed": 29.96139841052,
+    "usdt_uta": 0.0,
+    "usdt_earn": 57.2714
+  },
+  "raw_wallet_balance": {
+    "ts_ms": 1792263136450,
+    "method": "GET",
+    "path": "/v5/account/wallet-balance",
+    "status": 200,
+    "body": {
+      "retCode": 0,
+      "retMsg": "OK",
+      "result": {
+        "list": [
+          {
+            "accountIMRate": "",
+            "totalMaintenanceMarginByMp": "",
+            "totalInitialMargin": "",
+            "accountType": "UNIFIED",
+            "accountMMRate": "",
+            "accountMMRateByMp": "",
+            "accountIMRateByMp": "",
+            "totalInitialMarginByMp": "",
+            "totalMaintenanceMargin": "",
+            "totalEquity": "0.00139782",
+            "totalMarginBalance": "",
+            "totalAvailableBalance": "",
+            "totalPerpUPL": "0",
+            "totalWalletBalance": "0.00139782",
+            "accountLTV": "",
+            "coin": [
+              {
+                "spotBorrow": "0",
+                "availableToBorrow": "",
+                "bonus": "0",
+                "accruedInterest": "0",
+                "availableToWithdraw": "",
+                "totalOrderIM": "0",
+                "equity": "0",
+                "totalPositionMM": "0",
+                "usdValue": "0.00075746",
+                "unrealisedPnl": "0",
+                "collateralSwitch": false,
+                "spotHedgingQty": "0",
+                "borrowAmount": "0",
+                "totalPositionIM": "0",
+                "walletBalance": "0",
+                "cumRealisedPnl": "0",
+                "locked": "0",
+                "marginCollateral": true,
+                "colRes": "0",
+                "coin": "BTC"
+              },
+              {
+                "spotBorrow": "0",
+                "availableToBorrow": "",
+                "bonus": "0",
+                "accruedInterest": "0",
+                "availableToWithdraw": "",
+                "totalOrderIM": "0",
+                "equity": "0.00008226",
+                "totalPositionMM": "0",
+                "usdValue": "0.00008215",
+                "unrealisedPnl": "0",
+                "collateralSwitch": true,
+                "spotHedgingQty": "0",
+                "borrowAmount": "0",
+                "totalPositionIM": "0",
+                "walletBalance": "0.00008226",
+                "cumRealisedPnl": "-33.34932605",
+                "locked": "0",
+                "marginCollateral": true,
+                "colRes": "-1",
+                "coin": "USDT"
+              },
+              {
+                "spotBorrow": "0",
+                "availableToBorrow": "",
+                "bonus": "0",
+                "accruedInterest": "0",
+                "availableToWithdraw": "",
+                "totalOrderIM": "0",
+                "equity": "0.075",
+                "totalPositionMM": "0",
+                "usdValue": "0.00009303",
+                "unrealisedPnl": "0",
+                "collateralSwitch": false,
+                "spotHedgingQty": "0",
+                "borrowAmount": "0",
+                "totalPositionIM": "0",
+                "walletBalance": "0.075",
+                "cumRealisedPnl": "-0.625",
+                "locked": "0",
+                "marginCollateral": false,
+                "colRes": "-1",
+                "coin": "TAC"
+              },
+              {
+                "spotBorrow": "0",
+                "availableToBorrow": "",
+                "bonus": "0",
+                "accruedInterest": "0",
+                "availableToWithdraw": "",
+                "totalOrderIM": "0",
+                "equity": "0",
+                "totalPositionMM": "0",
+                "usdValue": "0",
+                "unrealisedPnl": "0",
+                "collateralSwitch": false,
+                "spotHedgingQty": "0",
+                "borrowAmount": "0",
+                "totalPositionIM": "0",
+                "walletBalance": "0",
+                "cumRealisedPnl": "0",
+                "locked": "0",
+                "marginCollateral": true,
+                "colRes": "0",
+                "coin": "USDC"
+              }
+            ]
+          }
+        ]
       }
-    ]
+    }
   }
 }

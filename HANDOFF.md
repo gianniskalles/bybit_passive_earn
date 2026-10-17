@@ -409,6 +409,11 @@ pytest                                   # οπουδήποτε· CI σε κάθ
   FLAT, πολλές με μέγεθος = unreadable. (2) κενό `accountMMRate` με 0 USDT στο UTA
   και καμία θέση = margin 0· αλλιώς unreadable. Το `--check` γράφει πλέον κι αυτό τις
   ακατέργαστες απαντήσεις στο `raw/`.
+  **Δεύτερο `--check`:** το UTA έχει υπολείμματα (USDT 0,00008, TAC 0,075), άρα ο
+  κανόνας «κάθε νόμισμα 0» δεν αρκούσε. Νέος κανόνας, κλειδωμένος στο πραγματικό σώμα
+  του `wallet-balance` (`raw_wallet_balance` στο fixture): κενό `accountMMRate` και κενό
+  `totalMaintenanceMargin` και `totalOrderIM` 0 σε κάθε νόμισμα και καμία ανοιχτή θέση
+  = margin 0· τα υπόλοιπα του wallet δεν παίζουν ρόλο· αλλιώς unreadable.
 
 ## 9. Ανοιχτά — τι μένει
 
