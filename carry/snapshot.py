@@ -181,6 +181,10 @@ class Account:
     coins: Mapping[str, CoinBalance]
     fees: Mapping[Tuple[str, str], Tuple[float, float]]   # (category, symbol) -> (taker, maker)
     collateral: Mapping[str, Collateral]
+    # Bybit left accountMMRate/IMRate empty because the UTA holds nothing
+    # (17/10: 0 USDT, all in Earn, "Margin Balance: --"). The rates are then
+    # 0, and take() keeps the account only if no position is open or unread.
+    margin_unreported: bool = False
 
     def balance(self, coin: str) -> CoinBalance:
         """A coin absent from a successful wallet read has a zero balance."""
@@ -329,14 +333,25 @@ def market_staleness(m: Market, now_ms: int) -> Optional[str]:
 
 
 def read_position(client, symbol: str) -> PerpPosition:
+    """One-way mode only. Hedge mode = a row with positionIdx 1 or 2. Several
+    positionIdx 0 rows (Bybit returns an empty placeholder row with seq -1
+    next to the real one, 17/10) are FLAT when every size is 0; several rows
+    with a size are unreadable."""
     rows = [r for r in client.get_positions(symbol) if r.get("symbol") == symbol]
     where = f"position {symbol}"
     if not rows:
         return PerpPosition(symbol, "", 0.0, None, None, 0)
-    if len(rows) > 1 or str(rows[0].get("positionIdx", 0)) != "0":
+    if any(str(r.get("positionIdx", 0)) != "0" for r in rows):
         raise Unreadable(f"{where}: hedge-mode rows {rows!r}; one-way mode is required")
+    sizes = [_f(r, "size", where) for r in rows]
+    if any(sz < 0 for sz in sizes):
+        raise Unreadable(f"{where}: negative size in {rows!r}")
+    if len(rows) > 1:
+        if any(sz > 0 for sz in sizes):
+            raise Unreadable(f"{where}: {len(rows)} one-way rows, with a size: {rows!r}")
+        return PerpPosition(symbol, "", 0.0, None, None, 0)
     r = rows[0]
-    size = _f(r, "size", where)
+    size = sizes[0]
     side = str(r.get("side") or "").strip()
     if size < 0 or (size > 0 and side not in ("Buy", "Sell")):
         raise Unreadable(f"{where}: size={size} side={side!r}")
@@ -346,6 +361,11 @@ def read_position(client, symbol: str) -> PerpPosition:
     return PerpPosition(symbol, side if size > 0 else "", size,
                         _opt_f(r, "avgPrice") if size > 0 else None,
                         _opt_f(r, "liqPrice") if size > 0 else None, int(adl))
+
+
+def _empty(row: Mapping, key: str) -> bool:
+    v = row.get(key)
+    return v is None or (isinstance(v, str) and not v.strip())
 
 
 def read_account(client, symbols: Tuple[str, ...], base_coins: Tuple[str, ...]) -> Account:
@@ -360,6 +380,17 @@ def read_account(client, symbols: Tuple[str, ...], base_coins: Tuple[str, ...]) 
         wc = f"{where} {name}"
         coins[name] = CoinBalance(_f(c, "walletBalance", wc), _f(c, "equity", wc),
                                   _opt_f(c, "borrowAmount") or 0.0)
+    # Empty margin rates are read as 0 ONLY when the UTA is empty: every
+    # coin's wallet and equity 0, and totalEquity 0 or empty. Anything else
+    # stays unreadable (the same message as before).
+    unreported = _empty(acct, "accountMMRate") or _empty(acct, "accountIMRate")
+    if unreported:
+        total = None if _empty(acct, "totalEquity") else _f(acct, "totalEquity", where)
+        idle = (total is None or total == 0.0) and all(
+            b.wallet == 0 and b.equity == 0 for b in coins.values())
+        if not idle:
+            _f(acct, "accountMMRate", where)          # raises "accountMMRate missing"
+            _f(acct, "accountIMRate", where)
     fees: Dict[Tuple[str, str], Tuple[float, float]] = {}
     for sym in symbols:
         for cat in ("linear", "spot"):
@@ -372,6 +403,9 @@ def read_account(client, symbols: Tuple[str, ...], base_coins: Tuple[str, ...]) 
         wc = f"collateral-info {coin}"
         collateral[coin] = Collateral(_f(row, "collateralRatio", wc),
                                       _b(row, "marginCollateral", wc), _b(row, "collateralSwitch", wc))
+    if unreported:
+        return Account(margin_mode, 0.0, 0.0, MappingProxyType(coins), MappingProxyType(fees),
+                       MappingProxyType(collateral), margin_unreported=True)
     return Account(margin_mode, _f(acct, "accountMMRate", where), _f(acct, "accountIMRate", where),
                    MappingProxyType(coins), MappingProxyType(fees), MappingProxyType(collateral))
 
@@ -452,6 +486,13 @@ def take(client, cfg: Mapping, now_ms: Optional[int] = None, private: bool = Tru
                 positions[sym] = p
         base = tuple(sorted({s[:-len("USDT")] for s in symbols}))
         account = attempt("account", lambda: read_account(client, symbols, base))
+        if account is not None and account.margin_unreported:
+            open_or_unread = [s for s in symbols if s not in positions or not positions[s].flat]
+            if open_or_unread:
+                # No margin rate is only harmless with nothing open.
+                errors["account"] = (f"Unreadable: wallet-balance: accountMMRate missing while "
+                                     f"positions {open_or_unread} are open or unread")
+                account = None
         open_orders = attempt("orders", lambda: read_open_orders(client))
         earn = attempt("earn", lambda: read_earn(client, str(cfg["EARN_COIN"]).upper()))
     else:

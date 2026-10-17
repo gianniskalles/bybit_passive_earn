@@ -402,6 +402,13 @@ pytest                                   # οπουδήποτε· CI σε κάθ
 - ✅ **17/10 — χωρίς testnet: επιβλεπόμενος κύκλος στο mainnet**
   (`scripts/mainnet_roundtrip.py`, ~40 USDT, όριο 50, μία φορά). Εντολές:
   `DEPLOY.md`, «Carry — επιβλεπόμενος κύκλος στο mainnet».
+- ✅ **17/10 — το πρώτο `--check` στο mainnet:** δύο λάθη ανάγνωσης, διορθωμένα και
+  κλειδωμένα στην ακριβή έξοδο (`tests/data/carry_mainnet_check_20261017.json`):
+  (1) δύο γραμμές ETHUSDT με `positionIdx` 0 και `size` "0" (η μία κενή, `seq` −1)
+  διαβάζονταν ως hedge mode· hedge = γραμμή με `positionIdx` 1/2, όλες μηδενικές =
+  FLAT, πολλές με μέγεθος = unreadable. (2) κενό `accountMMRate` με 0 USDT στο UTA
+  και καμία θέση = margin 0· αλλιώς unreadable. Το `--check` γράφει πλέον κι αυτό τις
+  ακατέργαστες απαντήσεις στο `raw/`.
 
 ## 9. Ανοιχτά — τι μένει
 
