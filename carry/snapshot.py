@@ -181,9 +181,9 @@ class Account:
     coins: Mapping[str, CoinBalance]
     fees: Mapping[Tuple[str, str], Tuple[float, float]]   # (category, symbol) -> (taker, maker)
     collateral: Mapping[str, Collateral]
-    # Bybit left accountMMRate/IMRate empty because the UTA holds nothing
-    # (17/10: 0 USDT, all in Earn, "Margin Balance: --"). The rates are then
-    # 0, and take() keeps the account only if no position is open or unread.
+    # Bybit left accountMMRate/IMRate empty because no margin is in use
+    # (17/10: all USDT in Earn, dust only, "Margin Balance: --"). The rates are
+    # then 0, and take() keeps the account only if no position is open or unread.
     margin_unreported: bool = False
 
     def balance(self, coin: str) -> CoinBalance:
@@ -380,14 +380,17 @@ def read_account(client, symbols: Tuple[str, ...], base_coins: Tuple[str, ...]) 
         wc = f"{where} {name}"
         coins[name] = CoinBalance(_f(c, "walletBalance", wc), _f(c, "equity", wc),
                                   _opt_f(c, "borrowAmount") or 0.0)
-    # Empty margin rates are read as 0 ONLY when the UTA is empty: every
-    # coin's wallet and equity 0, and totalEquity 0 or empty. Anything else
-    # stays unreadable (the same message as before).
+    # Empty margin rates are read as 0 ONLY when Bybit reports no margin in
+    # use: accountMMRate AND totalMaintenanceMargin empty, and totalOrderIM 0
+    # on every coin (17/10: dust of USDT/TAC in the UTA, all else in Earn).
+    # Wallet balances play no part. Open positions are checked in take().
+    # Anything else stays unreadable (the same message as before).
     unreported = _empty(acct, "accountMMRate") or _empty(acct, "accountIMRate")
     if unreported:
-        total = None if _empty(acct, "totalEquity") else _f(acct, "totalEquity", where)
-        idle = (total is None or total == 0.0) and all(
-            b.wallet == 0 and b.equity == 0 for b in coins.values())
+        idle = (_empty(acct, "accountMMRate") and _empty(acct, "totalMaintenanceMargin")
+                and bool(acct.get("coin")) and all(
+                    not _empty(c, "totalOrderIM") and _opt_f(c, "totalOrderIM") == 0.0
+                    for c in acct.get("coin") or []))
         if not idle:
             _f(acct, "accountMMRate", where)          # raises "accountMMRate missing"
             _f(acct, "accountIMRate", where)
