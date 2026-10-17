@@ -452,10 +452,9 @@ def main(argv=None) -> int:
         print(f"refusing: {e}", file=sys.stderr)
         return 3
     key_name, secret_name = settings.carry_api_key_names(testnet_=False)
-    session = None
-    if args.approved and not args.check:
-        session = ResponseRecorder(Path(base["LOG_DIR"]) / "raw", testnet=False,
-                                   approved_mainnet=True)
+    # --check records too: the bodies are the evidence when a check refuses.
+    session = ResponseRecorder(Path(base["LOG_DIR"]) / "raw", testnet=False,
+                               approved_mainnet=True)
     client = CarryClient(api_key=env.get(key_name), api_secret=env.get(secret_name),
                          testnet=False, session=session)
     run = Roundtrip(base, env, client, notifier=Notifier(env, base), finish=args.finish)
