@@ -249,6 +249,10 @@ tail -n 1 /opt/hermes/logs/carry/$(date -u +%F).jsonl | $PY -m json.tool | head 
 
 ## Carry — testnet (μόνο με έγκριση του Giannis)
 
+> **17/10: παραλείπεται.** Τη θέση του παίρνει ο επιβλεπόμενος κύκλος στο
+> mainnet (ενότητα «Carry — επιβλεπόμενος κύκλος στο mainnet»). Τα εργαλεία
+> μένουν, αλλά δεν τρέχουν.
+
 Όλα με `BYBIT_TESTNET=1` **στην εντολή** (ποτέ στο `.env`). Το carry τότε:
 - διαβάζει το `config/carry.testnet.yaml` (`DRY_RUN: false`: πραγματικές
   εντολές **testnet**· το `config/carry.yaml` μένει `DRY_RUN: true`)·
@@ -327,3 +331,87 @@ sudo tar czf /opt/hermes/carry_testnet_$(date -u +%Y%m%dT%H%M%SZ).tgz \
 1. UNWIND, όπως πιο πάνω.
 2. Περιμένεις FLAT.
 3. STOP, και στέλνεις το tgz.
+
+## Carry — επιβλεπόμενος κύκλος στο mainnet (μία φορά, ~40 USDT)
+
+`scripts/mainnet_roundtrip.py`, μίας χρήσης:
+1. redeem από το Earn
+2. είσοδος στο ελάχιστο μέγεθος ETHUSDT
+3. αναμονή ενός settlement
+4. έξοδος
+5. USDT πίσω στο Earn
+6. σταματά μόνο του
+
+Κάθε βήμα είναι ένας κύκλος της παραγωγής: ίδιο plan, ίδια εκτέλεση, ίδιο
+book, ίδιο ledger, ίδιο Telegram.
+- **Όριο:** σκληρό όριο 50 USDT notional· καμία επιλογή δεν το ανεβάζει.
+- **Καταγραφή:** οι ακατέργαστες απαντήσεις μπαίνουν στο
+  `/opt/hermes/logs/carry/raw/`, μόνο το σώμα (κανένα header, κλειδί ή
+  υπογραφή).
+- **Config:** το `config/carry.yaml` **δεν αλλάζει** (μένει `DRY_RUN: true`).
+- **Risk state:** δεν γράφεται ποτέ. Η έξοδος επιβάλλεται μόνο στη μνήμη του
+  script, και μόνο αυστηρότερα από το υπογεγραμμένο state.
+
+```bash
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
+cd $REPO && sudo -u hermes git pull --ff-only origin main
+# 1. οι timers του carry σταματούν όσο τρέχει (ο heartbeat τρέχει από το ίδιο το script)
+sudo systemctl stop yield-carry-cycle.timer yield-carry-heartbeat.timer \
+    yield-carry-summary.timer yield-carry-calibrate.timer
+# 2. έλεγχος, μόνο ανάγνωση: ελάχιστη θέση, USDT που χρειάζονται, όλα τα εμπόδια
+sudo -u hermes env HOME=/opt/hermes $PY $REPO/scripts/mainnet_roundtrip.py --check
+```
+
+**Μόνο αφού ο Giannis δει την έξοδο του `--check` και πει «πάμε»:**
+
+```bash
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
+sudo systemd-run --uid=hermes --gid=hermes --unit=yield-carry-roundtrip \
+    --setenv=HOME=/opt/hermes --property=WorkingDirectory=/opt/hermes/yield_rotation \
+    --property=TimeoutStopSec=600 \
+    $PY $REPO/scripts/mainnet_roundtrip.py --i-approve-real-money
+journalctl -u yield-carry-roundtrip --since -30min --no-pager | tail -n 40
+```
+
+**Τι αρνείται:**
+- χωρίς `--i-approve-real-money`·
+- με `BYBIT_TESTNET`·
+- αν το `carry.yaml` δεν λέει `DRY_RUN: true`·
+- αν τρέχει timer του carry·
+- αν το carry δεν είναι FLAT·
+- αν το carry risk state δεν είναι NORMAL ή υπάρχει `CARRY_HOLD`·
+- αν το ETH δεν είναι ενεργό collateral ή ο λογαριασμός δεν είναι Cross Margin·
+- αν η ελάχιστη θέση με το buffer των 5 USDT ξεπερνά τα 50 USDT ή τα διαθέσιμα USDT.
+
+Όσο τρέχει κρατά το lock του κύκλου, και το `deploy.sh` αρνείται να τρέξει.
+
+**Διάρκεια:** περίπου 8–9 ώρες (ως το επόμενο settlement + 10'). Κάθε εντολή
+έρχεται στο Telegram.
+
+**Πρόωρο σταμάτημα:** `sudo systemctl stop yield-carry-roundtrip`. Το script
+πρώτα κλείνει και τα δύο σκέλη (έως 10'), και μετά τερματίζει. Αν κοπεί
+βίαια με ανοιχτή θέση:
+
+```bash
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
+sudo systemd-run --uid=hermes --gid=hermes --unit=yield-carry-roundtrip \
+    --setenv=HOME=/opt/hermes --property=WorkingDirectory=/opt/hermes/yield_rotation \
+    --property=TimeoutStopSec=600 \
+    $PY $REPO/scripts/mainnet_roundtrip.py --i-approve-real-money --finish
+```
+
+**Τέλος:**
+- Αποτέλεσμα στο `/opt/hermes/logs/carry/roundtrip_<utc>.json`.
+- Κωδικοί εξόδου:
+  - 0 = FLAT και USDT πίσω στο Earn·
+  - 5 = FLAT χωρίς είσοδο (ο λόγος είναι στο report)·
+  - 4 = έμεινε θέση (σταμάτα και ειδοποίησε).
+
+Μετά:
+
+```bash
+sudo systemctl start yield-carry-cycle.timer yield-carry-heartbeat.timer \
+    yield-carry-summary.timer yield-carry-calibrate.timer
+sudo tar czf /opt/hermes/carry_roundtrip_$(date -u +%Y%m%dT%H%M%SZ).tgz \
+    /opt/hermes/logs/carry/roundtrip_*.json /opt/hermes/logs/carry/raw /opt/hermes/logs/carry/ledger
+```

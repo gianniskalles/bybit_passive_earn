@@ -12,6 +12,11 @@ Three layers:
   3. Production floors (decision 13.1: no threshold is loosened to make the
      strategy trade). Only a config with TESTNET_ONLY: true may go below
      them, and such a config is refused unless BYBIT_TESTNET is set.
+  4. validate(..., roundtrip=True): the one supervised mainnet round trip
+     (scripts/mainnet_roundtrip.py, 17/10). Not a config key, so no file can
+     ask for it: only that script passes it. The floors do not apply (the
+     entry is forced), but: mainnet only, SYMBOLS [ETHUSDT], DRY_RUN false
+     in memory, and at most ROUNDTRIP_MAX_NOTIONAL_USD per symbol and in total.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ import yaml
 from carry.decide import Params
 
 CORE_SYMBOLS = ("BTCUSDT", "ETHUSDT")      # decision Δ2; altcoins need their own GO (13.10)
+ROUNDTRIP_MAX_NOTIONAL_USD = 50            # hard limit of the mainnet round trip (17/10)
 BUFFER_SHARE = 0.10                        # decision 13.9
 _SYMBOL_RE = re.compile(r"[A-Z0-9]{2,20}USDT")
 
@@ -159,15 +165,17 @@ def read_alt_report(path: Path) -> Optional[Dict]:
         return None
 
 
-def validate(cfg: Any, testnet: bool, alt_report: Optional[Dict] = None) -> List[str]:
-    """alt_report: the committed carry_alt_calibration.json (None = none)."""
+def validate(cfg: Any, testnet: bool, alt_report: Optional[Dict] = None,
+             roundtrip: bool = False) -> List[str]:
+    """alt_report: the committed carry_alt_calibration.json (None = none).
+    roundtrip: only scripts/mainnet_roundtrip.py (see the module docstring)."""
     if not isinstance(cfg, dict):
         return ["CONFIG: not a mapping"]
     errors: List[str] = []
     testnet_only = cfg.get("TESTNET_ONLY") is True
     for key, (check, desc) in SCHEMA.items():
         if key == "DEADMAN_URL" and cfg.get(key) is None and (
-                testnet_only or cfg.get("DRY_RUN") is True):
+                testnet_only or roundtrip or cfg.get("DRY_RUN") is True):
             # The forced testnet cycle is supervised by hand; paper trading
             # risks nothing. The external liveness check is a gate before
             # money (§10.4, decision 13.9: unset until just before live).
@@ -214,10 +222,28 @@ def validate(cfg: Any, testnet: bool, alt_report: Optional[Dict] = None) -> List
     if testnet_only and not testnet:
         errors.append("TESTNET_ONLY: this config lowers entry thresholds for a forced testnet "
                       "cycle and is refused unless BYBIT_TESTNET is set")
-    if not testnet_only:
+    if roundtrip:
+        errors.extend(_roundtrip_errors(cfg, testnet))
+    elif not testnet_only:
         for key, (check, desc) in PRODUCTION_FLOORS.items():
             if ok(key) and not check(cfg[key]):
                 errors.append(f"{key}: {cfg[key]!r} below the production floor {desc}")
+    return errors
+
+
+def _roundtrip_errors(cfg: Dict, testnet: bool) -> List[str]:
+    errors = []
+    if testnet or cfg.get("TESTNET_ONLY") is True:
+        errors.append("ROUNDTRIP: the supervised round trip is mainnet only")
+    if cfg.get("SYMBOLS") != ["ETHUSDT"]:
+        errors.append("ROUNDTRIP: SYMBOLS must be exactly [ETHUSDT]")
+    if cfg.get("DRY_RUN") is not False:
+        errors.append("ROUNDTRIP: DRY_RUN must be false in the round trip's in-memory config")
+    for key in ("MAX_NOTIONAL_PER_SYMBOL_USD", "TOTAL_CAPITAL_CAP_USD"):
+        v = cfg.get(key)
+        if not _pos(v) or v > ROUNDTRIP_MAX_NOTIONAL_USD:
+            errors.append(f"ROUNDTRIP: {key} {v!r} above the hard limit of "
+                          f"{ROUNDTRIP_MAX_NOTIONAL_USD} USDT")
     return errors
 
 

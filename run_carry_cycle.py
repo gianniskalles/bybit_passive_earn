@@ -128,10 +128,14 @@ def run_cycle(cfg: Optional[Dict], env: Dict[str, str], client, *,
               clock: Callable[[], float] = time.monotonic,
               sleep: Callable[[float], None] = time.sleep,
               paper_start: Tuple[float, float] = (0.0, 0.0),
-              exchange=None) -> Tuple[Dict, int]:
+              exchange=None, roundtrip: bool = False,
+              force_state: Optional[str] = None) -> Tuple[Dict, int]:
     """One carry cycle; returns (record, exit code). Exit codes: 0 ok,
     3 CONFIG_INCOMPLETE, 4 CYCLE_CRASH. `exchange` overrides the live
-    exchange (tests); DRY_RUN always uses the paper account."""
+    exchange (tests); DRY_RUN always uses the paper account.
+    roundtrip / force_state: only scripts/mainnet_roundtrip.py. roundtrip
+    validates its in-memory config as the supervised round trip;
+    force_state can only make the signed risk state stricter, never laxer."""
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
     cycle_id = datetime.fromtimestamp(now / 1000, timezone.utc).strftime("%Y%m%d_%H%M%S") + \
         "_" + uuid.uuid4().hex[:6]
@@ -144,9 +148,12 @@ def run_cycle(cfg: Optional[Dict], env: Dict[str, str], client, *,
     log_dir = Path(cfg["LOG_DIR"]) if isinstance(cfg.get("LOG_DIR"), str) else \
         settings.default_log_dir() / "carry"
     started = time.monotonic()
+    if roundtrip:
+        rec["roundtrip"] = True
     try:
         rc = _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_fn,
-                    public, clock, sleep, paper_start, exchange, log_dir)
+                    public, clock, sleep, paper_start, exchange, log_dir, roundtrip,
+                    force_state)
     except Exception as e:                                       # noqa: BLE001
         alerts.append(f"CYCLE_CRASH: {type(e).__name__}: {e}")
         rec["crash"] = traceback.format_exc(limit=8)
@@ -166,11 +173,12 @@ def run_cycle(cfg: Optional[Dict], env: Dict[str, str], client, *,
 
 
 def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_fn, public,
-           clock, sleep, paper_start, exchange, log_dir) -> int:
+           clock, sleep, paper_start, exchange, log_dir, roundtrip=False,
+           force_state=None) -> int:
     testnet = bool(getattr(client, "testnet", False))
     rec["testnet"] = testnet
     errors = [config_error] if config_error else cc.validate(
-        cfg, testnet, alt_report=cc.read_alt_report(cc.ALT_REPORT_FILE))
+        cfg, testnet, alt_report=cc.read_alt_report(cc.ALT_REPORT_FILE), roundtrip=roundtrip)
     if errors:
         alerts.append("CONFIG_INCOMPLETE: " + "; ".join(errors))
         return 3
@@ -199,6 +207,9 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
         state = stricter(state, "NO_NEW_POSITIONS")
         alerts.append(f"CARRY_HOLD: {hold['reason']} (since {hold['since_ms']}); released only "
                       f"by an operator write of the carry risk state")
+    if force_state:
+        state = stricter(state, force_state)            # never laxer than the signed state
+        rec["forced_state"] = force_state
     rec["risk_state"] = state
 
     # ---- book ------------------------------------------------------------------------
