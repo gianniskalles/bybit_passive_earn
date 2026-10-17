@@ -66,7 +66,9 @@ def paper_holds(path: Path) -> Optional[List[str]]:
 
 
 def check(client, cfg: Mapping, book_path: Path, key: str, paper_path: Optional[Path] = None,
-          now_ms: Optional[int] = None) -> Exposure:
+          now_ms: Optional[int] = None, take=None) -> Exposure:
+    """take: the snapshot reader (default carry.snapshot.take)."""
+    take = take or snapshot_mod.take
     lines: List[str] = []
     book_exists = Path(book_path).exists()
     paper_exists = paper_path is not None and Path(paper_path).exists()
@@ -95,7 +97,7 @@ def check(client, cfg: Mapping, book_path: Path, key: str, paper_path: Optional[
                                               "cannot be read"])
         return Exposure(OPEN if open_ else FLAT, lines)
     try:
-        snap = snapshot_mod.take(client, cfg, now_ms=now_ms, private=True)
+        snap = take(client, cfg, now_ms=now_ms, private=True)
     except Exception as e:                                    # noqa: BLE001
         return Exposure(UNKNOWN, lines + [f"exchange unreadable: {type(e).__name__}: {e}"])
     needed = [f"positions:{s}" for s in snap.symbols] + ["account"] + \

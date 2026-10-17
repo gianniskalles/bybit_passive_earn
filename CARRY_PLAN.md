@@ -517,4 +517,12 @@ DEADMAN_URL: null                # εξωτερικός έλεγχος ζωής 
     testnet ως transient unit `systemd-run --unit=yield-carry-testnet`
     (`scripts/carry_testnet_loop.sh`), σταμάτημα με `systemctl stop` ή αρχείο
     `STOP`. Ο heartbeat ανανεώνει πριν τη λήξη (16/10) και εγκρίθηκε.
+20. **17/10 — αλλαγή σχεδίου: χωρίς testnet.** Ένας επιβλεπόμενος πλήρης κύκλος
+    στο πραγματικό subaccount με ~40 USDT (`scripts/mainnet_roundtrip.py`):
+    redeem → είσοδος στο ελάχιστο ETHUSDT → ένα settlement → έξοδος → USDT
+    πίσω στο Earn, με τον κύκλο της παραγωγής (ίδια εκτέλεση, book, ledger) και
+    καταγραφή των ακατέργαστων απαντήσεων (χωρίς headers και κλειδιά). Μόνο με
+    `--i-approve-real-money`· σκληρό όριο 50 USDT notional (`validate(...,
+    roundtrip=True)`, όχι κλειδί config)· σταματά μόνο του· οι timers του carry
+    σταματούν όσο τρέχει· το `DRY_RUN` του `carry.yaml` δεν αλλάζει.
 

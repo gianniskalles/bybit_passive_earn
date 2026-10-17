@@ -143,6 +143,11 @@ run_step() {  # run_step N TITLE FUNCTION
 step1_old_units() {
     local ours unit bad=0 cron
     echo "system: $SYSTEM"
+    if [[ $(systemctl is-active yield-carry-roundtrip.service 2>/dev/null || true) == active ]]; then
+        echo "REFUSED: the supervised mainnet round trip (yield-carry-roundtrip) is running."
+        echo "Deploy only after it has finished (it stops by itself after one round trip)."
+        return 1
+    fi
     if [[ $SYSTEM == yield ]] && carry_enabled; then
         carry_must_be_flat
     fi
@@ -161,6 +166,8 @@ step1_old_units() {
     for unit in $units; do
         if grep -qxF "$unit" <<<"$ours"; then
             echo "  keep    $unit (installed by this repo)"
+        elif [[ $unit == yield-carry-roundtrip.service ]]; then
+            echo "  keep    $unit (transient supervised round trip; not running)"
         elif [[ $unit == yield-carry-testnet.service ]]; then
             # the transient forced testnet run (scripts/carry_testnet_loop.sh)
             echo "  keep    $unit (transient testnet run; stop it with systemctl stop yield-carry-testnet)"

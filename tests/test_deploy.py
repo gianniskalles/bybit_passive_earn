@@ -276,6 +276,8 @@ def sandbox(tmp_path):
     for t in CARRY_TIMERS:
         (stubs / f"systemctl.is-enabled.{t}.out").write_text("disabled\n")
         (stubs / f"systemctl.is-active.{t}.out").write_text("inactive\n")
+    # No supervised mainnet round trip is running.
+    (stubs / "systemctl.is-active.yield-carry-roundtrip.service.out").write_text("inactive\n")
     # regression report: absent before the run, passing after it
     (stubs / "python.preflight.regression-ok.rc").write_text("1\n0\n")
     (stubs / "python.preflight.regression-report.out").write_text(str(tmp_path / "reg.json") + "\n")

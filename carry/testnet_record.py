@@ -5,7 +5,9 @@ unverified fields of CARRY_PLAN §12 (cumFeeDetail, retCodes 110017/110072,
 the transaction log's SETTLEMENT `change`) can be locked in tests on real
 answers.
 
-Testnet only: the constructor refuses unless told it runs on testnet.
+Testnet, or mainnet only for the one supervised round trip
+(scripts/mainnet_roundtrip.py, approved_mainnet=True): the constructor
+refuses anything else.
 Only the RESPONSE is kept: its body, the HTTP status, the method and the URL
 path. Never a request header (X-BAPI-API-KEY, X-BAPI-SIGN, X-BAPI-TIMESTAMP,
 ...), never the query string or the request body, never a key, a secret or
@@ -24,9 +26,10 @@ import requests
 
 
 class ResponseRecorder(requests.Session):
-    def __init__(self, out_dir: Path, testnet: bool):
-        if testnet is not True:
-            raise ValueError("refusing: raw responses are recorded on testnet only")
+    def __init__(self, out_dir: Path, testnet: bool, approved_mainnet: bool = False):
+        if testnet is not True and approved_mainnet is not True:
+            raise ValueError("refusing: raw responses are recorded on testnet only "
+                             "(or by the approved mainnet round trip)")
         super().__init__()
         self.out_dir = Path(out_dir)
 

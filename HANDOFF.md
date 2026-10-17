@@ -399,6 +399,9 @@ pytest                                   # οπουδήποτε· CI σε κάθ
 - ✅ **17/10 — testnet έτοιμο:** `DRY_RUN: false` μόνο στο `carry.testnet.yaml`·
   ακατέργαστες απαντήσεις (μόνο σώμα) στο `logs/carry-testnet/raw/`· βρόχος
   `systemd-run --unit=yield-carry-testnet`. Εντολές: `DEPLOY.md`, «Carry — testnet».
+- ✅ **17/10 — χωρίς testnet: επιβλεπόμενος κύκλος στο mainnet**
+  (`scripts/mainnet_roundtrip.py`, ~40 USDT, όριο 50, μία φορά). Εντολές:
+  `DEPLOY.md`, «Carry — επιβλεπόμενος κύκλος στο mainnet».
 
 ## 9. Ανοιχτά — τι μένει
 
