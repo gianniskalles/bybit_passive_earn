@@ -95,13 +95,31 @@ class Notifier:
         return self.enabled and bool(self.sender(self.token, self.chat, text))
 
     def observe(self, channel: str, condition: Optional[str], text: str = "",
-                resolved_text: Optional[str] = None) -> bool:
+                resolved_text: Optional[str] = None, confirm: int = 1) -> bool:
         """Report the channel's current condition (None = healthy).
-        Returns True if a message was sent."""
+        Returns True if a message was sent.
+
+        confirm=N: a CHANGE of condition (either way, including back to
+        healthy) is announced only once the new condition has been observed
+        N times in a row; a blip that reverts before that sends nothing."""
         data = self._load()
         prev = data.get(channel) or {}
         now = self.clock()
         last_cond, last_sent = prev.get("condition"), prev.get("sent_at", 0)
+
+        if confirm > 1:
+            if condition == last_cond:
+                if "pending" in prev:                   # the blip reverted
+                    data[channel] = {k: v for k, v in prev.items()
+                                     if k not in ("pending", "seen")}
+                    self._save(data)
+            else:
+                seen = prev.get("seen", 0) + 1 if (
+                    "pending" in prev and prev["pending"] == condition) else 1
+                if seen < confirm:
+                    data[channel] = {**prev, "pending": condition, "seen": seen}
+                    self._save(data)
+                    return False
 
         if condition is None:
             if last_cond is None:

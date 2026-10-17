@@ -59,6 +59,8 @@ JSONL_FILE = "{date}.jsonl"  # LOG_DIR / jsonl template
 CYCLE_LATENCY_ALERT_S = 300
 AGENT_TIMEOUT_S = 280
 SESSION_RETENTION_DAYS = 7
+# A risk-state change is announced only once it has held this many cycles.
+STATE_CONFIRM_CYCLES = 2
 # A Stake Bybit reports Success may lag behind /v5/earn/position; count it
 # against the per-product cap for this long (double counting only under-stakes).
 RECENT_STAKE_WINDOW_MS = 30 * 60 * 1000
@@ -1055,7 +1057,7 @@ def notify_cycle(rec: Dict[str, Any], notifier: Notifier) -> None:
     notifier.observe("risk_state", None if state == "NORMAL" else f"{state}:{meta.get('code')}",
                      f"⚠️ RISK STATE {state} ({meta.get('code')}, source={meta.get('source')}): "
                      f"no new positions" + ("; redeeming everything" if state == "UNWIND" else ""),
-                     resolved_text="✅ RISK STATE back to NORMAL")
+                     resolved_text="✅ RISK STATE back to NORMAL", confirm=STATE_CONFIRM_CYCLES)
     errors = rec.get("data_errors") or {}
     notifier.observe("data", ",".join(sorted(errors)) or None,
                      f"⚠️ Bybit data unavailable: {', '.join(sorted(errors))} — no STAKE while it lasts",

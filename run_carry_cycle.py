@@ -46,6 +46,8 @@ from carry import snapshot as snapshot_mod
 from carry.paper import PaperExchange
 from carry.plan import FLAT, OPEN, plan_cycle
 
+# A risk-state change is announced only once it has held this many cycles.
+STATE_CONFIRM_CYCLES = 2
 CONSERVATIVE = {"NORMAL": 0, "NO_NEW_POSITIONS": 1, "UNWIND": 2}
 LEDGER_LOOKBACK_MS = 15 * 86_400_000
 
@@ -307,7 +309,8 @@ def notify_cycle(rec: Dict, notifier) -> None:
     state = rec.get("risk_state")
     notifier.observe("carry_risk_state", None if state == "NORMAL" else state,
                      f"⚠️ {name} RISK STATE {state}: no new positions",
-                     resolved_text=f"✅ {name} risk state back to NORMAL")
+                     resolved_text=f"✅ {name} risk state back to NORMAL",
+                     confirm=STATE_CONFIRM_CYCLES)
     if not rec.get("dry_run"):
         for o in rec.get("orders", []):
             if o.get("filled"):
@@ -336,8 +339,14 @@ def main() -> int:
     # yield rotation's BYBIT_API_KEY: two systems never share an account; and
     # on testnet only the testnet variables (settings.carry_api_key_names).
     key_name, secret_name = settings.carry_api_key_names(testnet)
+    session = None
+    if testnet and cfg is not None:
+        # Testnet only: every response body to <LOG_DIR>/raw/ (§12 fields);
+        # never a header, key or signature (carry/testnet_record.py).
+        from carry.testnet_record import ResponseRecorder
+        session = ResponseRecorder(Path(cfg["LOG_DIR"]) / "raw", testnet=True)
     client = CarryClient(api_key=env.get(key_name), api_secret=env.get(secret_name),
-                         testnet=testnet)
+                         testnet=testnet, session=session)
     lock_path = settings.carry_cycle_file().with_name("carry_cycle.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as lock:

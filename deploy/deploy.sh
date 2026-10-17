@@ -161,6 +161,9 @@ step1_old_units() {
     for unit in $units; do
         if grep -qxF "$unit" <<<"$ours"; then
             echo "  keep    $unit (installed by this repo)"
+        elif [[ $unit == yield-carry-testnet.service ]]; then
+            # the transient forced testnet run (scripts/carry_testnet_loop.sh)
+            echo "  keep    $unit (transient testnet run; stop it with systemctl stop yield-carry-testnet)"
         elif [[ $unit == yield-* ]]; then
             echo "  disable $unit (old yield unit)"
             sysd disable --now "$unit"

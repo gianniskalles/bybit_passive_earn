@@ -15,9 +15,18 @@ Decision table (FINISH_PLAN A1-B, T1.3, T1.4):
     malformed, bad HMAC, no key)                -> ABSTAIN + alert, never overwrite
   NO_NEW_POSITIONS with source=heartbeat_bootstrap
     and a verified clean cycle AFTER its ts     -> write NORMAL (heartbeat_renew)
-  NORMAL + fresh                                -> nothing
-  NORMAL + stale, scanner alive                 -> write NORMAL (heartbeat_renew)
+  NORMAL + younger than RENEW_AFTER_MS          -> nothing
+  NORMAL + older than RENEW_AFTER_MS (half of
+    MAX_AGE_MS, fresh or stale), scanner alive  -> write NORMAL (heartbeat_renew)
+  NORMAL + older than RENEW_AFTER_MS but still
+    fresh, scanner not alive                    -> ABSTAIN (it expires on its own)
   NORMAL + stale, scanner not alive             -> ABSTAIN + alert
+
+Renewing at half the age limit, with the same conditions as before (no
+blocking code, API reachable, signature valid, scanner alive), means a
+healthy cycle never sees a stale record: a heartbeat every few minutes keeps
+the age well under MAX_AGE_MS. If the heartbeat stops, nothing else writes,
+so the record still goes stale within MAX_AGE_MS of its last renewal.
   anything else (operator states, UNWIND,
     bootstrap without a clean cycle yet)        -> ABSTAIN (+ alert if stale)
 
@@ -65,6 +74,7 @@ import settings
 from notify import Notifier
 
 MAX_AGE_MS = risk_state.MAX_AGE_MS
+RENEW_AFTER_MS = MAX_AGE_MS // 2   # renew before expiry, never wait for it
 
 # The ONLY cycle-log codes that block the heartbeat. See module docstring.
 BLOCKING_CODES = (
@@ -337,21 +347,26 @@ def _decide(env: Dict[str, str], system: System = SYSTEMS["yield"]) -> Tuple[int
                 f"({age_min} min old). Heartbeat did NOT renew.")
         return 0, None, ""
 
-    if v.fresh:
+    if v.fresh and (v.age_ms or 0) < RENEW_AFTER_MS:
         print("[heartbeat] OK: state is NORMAL and fresh")
         return 0, None, ""
 
     if not scanner_alive(log_dir, scanner_window_ms):
+        if v.fresh:
+            print(f"[heartbeat] ABSTAIN: NORMAL ({age_min} min), scanner not alive; not "
+                  f"renewing — it expires on its own")
+            return 0, None, ""
         print(f"[heartbeat] ABSTAIN: NORMAL but stale ({age_min} min) AND scanner "
               f"not alive (no recent decision). NOT renewing.")
         return 0, "scanner_dead", (
             f"⚠️ HEARTBEAT ABSTAIN: risk state is NORMAL but STALE ({age_min} min) AND the "
             f"scanner has not produced a recent decision. Risk state NOT renewed.")
 
+    was = "fresh" if v.fresh else "stale"
     risk_state.write(state_file, hmac_key, "NORMAL",
-                     f"heartbeat (was stale {age_min} min, scanner alive)",
+                     f"heartbeat (was {was}, {age_min} min, scanner alive)",
                      risk_state.SOURCE_RENEW, profile=profile)
-    print(f"[heartbeat] WROTE: NORMAL (was stale {age_min} min, scanner alive)")
+    print(f"[heartbeat] WROTE: NORMAL (was {was}, {age_min} min, scanner alive)")
     return 0, None, ""
 
 

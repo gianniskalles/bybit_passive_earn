@@ -246,3 +246,84 @@ tail -n 1 /opt/hermes/logs/carry/$(date -u +%F).jsonl | $PY -m json.tool | head 
 Το κλειδί (βήμα 7) το δίνεις στον Hermes για το `/opt/hermes/.env` ως
 `BYBIT_CARRY_API_KEY` / `BYBIT_CARRY_API_SECRET`. Το `DRY_RUN: false` και το
 `DEADMAN_URL` αλλάζουν στο git, όχι στο UI.
+
+## Carry — testnet (μόνο με έγκριση του Giannis)
+
+Όλα με `BYBIT_TESTNET=1` **στην εντολή** (ποτέ στο `.env`). Το carry τότε:
+- διαβάζει το `config/carry.testnet.yaml` (`DRY_RUN: false`: πραγματικές
+  εντολές **testnet**· το `config/carry.yaml` μένει `DRY_RUN: true`)·
+- γράφει μόνο στα `/opt/hermes/state/carry-testnet/` και
+  `/opt/hermes/logs/carry-testnet/`·
+- υπογράφει μόνο με `BYBIT_CARRY_TESTNET_API_KEY` / `_SECRET`·
+- κρατά κάθε απάντηση της Bybit στο `/opt/hermes/logs/carry-testnet/raw/`
+  (μόνο το σώμα· κανένα header, κλειδί ή υπογραφή).
+
+Οι timers του mainnet συνεχίζουν κανονικά.
+
+```bash
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
+cd $REPO && sudo -u hermes git pull --ff-only origin main
+grep -n '^DRY_RUN' $REPO/config/carry.yaml $REPO/config/carry.testnet.yaml   # true / false
+sudo -u hermes $PY $REPO/deploy/preflight.py keys --system carry   # testnet key: fingerprint, ≠ mainnet
+```
+
+**Α. Capture (μόνο ανάγνωση):**
+
+```bash
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
+sudo -u hermes env HOME=/opt/hermes BYBIT_TESTNET=1 $PY $REPO/scripts/testnet.py carry-capture
+```
+
+→ `tests/data/carry/testnet_<utc>.json` και ό,τι τυπώθηκε στο stderr.
+
+**Β. Αναγκαστικός πλήρης κύκλος** (redeem → είσοδος → ≥1 settlement → έξοδος →
+USDT πίσω στο Earn), ως transient unit:
+
+```bash
+sudo systemd-run --uid=hermes --gid=hermes --unit=yield-carry-testnet \
+    --setenv=HOME=/opt/hermes --setenv=BYBIT_TESTNET=1 \
+    --property=WorkingDirectory=/opt/hermes/yield_rotation \
+    /opt/hermes/yield_rotation/scripts/carry_testnet_loop.sh
+systemctl status yield-carry-testnet --no-pager
+journalctl -u yield-carry-testnet --since -30min --no-pager | tail -n 40
+```
+
+Κάθε 5': ένας κύκλος και ένας heartbeat. Ο βρόχος αρνείται να ξεκινήσει χωρίς
+`BYBIT_TESTNET=1`, ή αν έχει μείνει αρχείο `STOP` από προηγούμενο τρέξιμο.
+Το `deploy.sh` δεν αγγίζει αυτό το unit.
+
+```bash
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
+L=/opt/hermes/logs/carry-testnet
+# ο τελευταίος κύκλος: κατάσταση, αποφάσεις, ενέργειες, εντολές, alerts
+tail -n 1 $L/$(date -u +%F).jsonl | $PY -c 'import json,sys; r=json.loads(sys.stdin.read()); print(r["risk_state"], r["decisions"], [a["kind"] for a in r["actions"]], len(r["orders"]), r["alerts"])'
+grep -h '"type": "funding"' $L/ledger/*.jsonl | tail -n 3              # funding μετά από settlement
+# έξοδος, ΜΟΝΟ αφού φανεί funding:
+sudo -u hermes env HOME=/opt/hermes BYBIT_TESTNET=1 $PY $REPO/risk_state.py --system carry write UNWIND "testnet forced exit"
+```
+
+Σειρά που περιμένουμε:
+1. NO_NEW_POSITIONS (bootstrap) → NORMAL.
+2. `EARN_REDEEM_FOR_ENTRY` → perp + spot → γραμμή funding στο ledger.
+3. UNWIND → τα δύο σκέλη κλείνουν (book FLAT) → `EARN_RETURN`.
+
+**Σταμάτημα:**
+- Κανονικά με το αρχείο STOP: ο τρέχων κύκλος τελειώνει πρώτα.
+  `sudo -u hermes touch /opt/hermes/state/carry-testnet/STOP`
+- Αμέσως, μόνο σε ανάγκη: `sudo systemctl stop yield-carry-testnet`.
+- Μετά: `sudo systemctl reset-failed yield-carry-testnet 2>/dev/null || true`.
+  Το `STOP` το σβήνεις πριν από νέο τρέξιμο.
+
+**Παράδοση:**
+
+```bash
+sudo tar czf /opt/hermes/carry_testnet_$(date -u +%Y%m%dT%H%M%SZ).tgz \
+    /opt/hermes/logs/carry-testnet /opt/hermes/state/carry-testnet
+```
+
+Δεν περιέχει κλειδιά.
+
+**Αν εμφανιστεί** `CARRY_HOLD`, `ORPHAN_LEG`, `BOOK_MISMATCH` ή `CYCLE_CRASH`:
+1. UNWIND, όπως πιο πάνω.
+2. Περιμένεις FLAT.
+3. STOP, και στέλνεις το tgz.

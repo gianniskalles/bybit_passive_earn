@@ -509,4 +509,12 @@ DEADMAN_URL: null                # εξωτερικός έλεγχος ζωής 
     να μην κάθεται ποτέ στη θέση του πραγματικού. Ο κύκλος και το
     `scripts/testnet.py carry-capture` στο testnet διαβάζουν μόνο αυτές· ο κύκλος
     του mainnet μόνο τις `BYBIT_CARRY_API_KEY/_SECRET`· κανένα fallback.
+19. **17/10 — testnet.** Εξουσιοδότηση: `DRY_RUN: false` **μόνο** στο
+    `config/carry.testnet.yaml`, ποτέ στο `config/carry.yaml` (test που
+    αποτυγχάνει σε οτιδήποτε άλλο από `DRY_RUN: true` εκεί). Ακατέργαστες
+    απαντήσεις της Bybit μόνο στο testnet, μόνο το σώμα της απάντησης (κανένα
+    header `X-BAPI-*`, κλειδί ή υπογραφή), στο `<LOG_DIR>/raw/`. Ο βρόχος του
+    testnet ως transient unit `systemd-run --unit=yield-carry-testnet`
+    (`scripts/carry_testnet_loop.sh`), σταμάτημα με `systemctl stop` ή αρχείο
+    `STOP`. Ο heartbeat ανανεώνει πριν τη λήξη (16/10) και εγκρίθηκε.
 
