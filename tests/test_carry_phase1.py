@@ -206,12 +206,30 @@ def test_testnet_config_refused_on_mainnet():
 
 
 def test_testnet_config_forces_an_entry_but_keeps_the_window():
-    """The forced cycle must still respect the settlement window and dry-run
-    defaults; only the entry thresholds are lowered."""
+    """The forced cycle must still respect the settlement window; only the
+    entry thresholds are lowered. DRY_RUN: false here sends real TESTNET
+    orders (authorised by Giannis, 17/10, for this file only); the file is
+    TESTNET_ONLY, so mainnet refuses it."""
     cfg = yaml.safe_load(TESTNET.read_text())
     assert cfg["NO_FUNDING_ACTION_BEFORE_SETTLEMENT_MIN"] >= 15
-    assert cfg["DRY_RUN"] is True
+    assert cfg["DRY_RUN"] is False and cfg["TESTNET_ONLY"] is True
+    assert cc.validate(cfg, testnet=False)                       # never on mainnet
     assert cfg["ENTRY_EV_MULTIPLE"] == 0 and cfg["MIN_HOLD_HOURS"] == 0
+
+
+def test_mainnet_carry_config_is_dry_run_true_and_nothing_else():
+    """config/carry.yaml: DRY_RUN is the boolean true, written exactly once as
+    `DRY_RUN: true` — no other value, spelling, duplicate or override. Only
+    Giannis turns it off (§10); the testnet authorisation of 17/10 covers
+    config/carry.testnet.yaml only."""
+    import re
+    text = SHIPPED.read_text()
+    lines = [l for l in text.splitlines() if re.match(r"\s*['\"]?DRY_RUN['\"]?\s*:", l)]
+    assert len(lines) == 1, lines
+    assert re.fullmatch(r"DRY_RUN: true(\s+#.*)?", lines[0]), lines[0]
+    cfg = yaml.safe_load(text)
+    assert cfg["DRY_RUN"] is True
+    assert "TESTNET_ONLY" not in cfg
 
 
 def test_config_to_params():

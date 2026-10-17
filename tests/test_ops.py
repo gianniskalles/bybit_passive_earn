@@ -277,8 +277,14 @@ def test_deploy_sh_order_regression_before_systemd():
 def test_deploy_stops_before_testnet():
     testnet = DEPLOY[DEPLOY.index("## Μετά — Testnet"):DEPLOY.index("## Μετά — Επταήμερο")]
     assert "ΣΤΑΜΑΤΑ" in testnet and "έγκριση" in testnet
+    # The only other mention: deploy KEEPS the transient forced-testnet unit
+    # (it never starts, stops or runs anything on testnet).
     assert "testnet" not in DEPLOY_SH.replace("Testnet is NOT part of this script", "") \
-        .replace("anything against testnet", "")
+        .replace("anything against testnet", "").replace("yield-carry-testnet", "") \
+        .replace("transient testnet run", "").replace("forced testnet run", "") \
+        .replace("(scripts/carry_testnet_loop.sh)", "")
+    assert "BYBIT_TESTNET" not in DEPLOY_SH and "testnet.py" not in DEPLOY_SH
+    assert "carry_testnet_loop" not in DEPLOY_SH.replace("(scripts/carry_testnet_loop.sh)", "")
 
 
 def test_deploy_snippets_define_their_variables():

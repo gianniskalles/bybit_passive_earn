@@ -339,8 +339,14 @@ def main() -> int:
     # yield rotation's BYBIT_API_KEY: two systems never share an account; and
     # on testnet only the testnet variables (settings.carry_api_key_names).
     key_name, secret_name = settings.carry_api_key_names(testnet)
+    session = None
+    if testnet and cfg is not None:
+        # Testnet only: every response body to <LOG_DIR>/raw/ (§12 fields);
+        # never a header, key or signature (carry/testnet_record.py).
+        from carry.testnet_record import ResponseRecorder
+        session = ResponseRecorder(Path(cfg["LOG_DIR"]) / "raw", testnet=True)
     client = CarryClient(api_key=env.get(key_name), api_secret=env.get(secret_name),
-                         testnet=testnet)
+                         testnet=testnet, session=session)
     lock_path = settings.carry_cycle_file().with_name("carry_cycle.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as lock:

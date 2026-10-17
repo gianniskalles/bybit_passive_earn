@@ -8,8 +8,8 @@
 TESTNET_ONLY: true
 SYMBOLS: [ETHUSDT]
 CYCLE_MINUTES: 5
-DRY_RUN: true                          # true = paper on testnet data; real testnet orders
-                                       # need false, set only by Giannis (§10)
+DRY_RUN: false                         # real TESTNET orders: authorised by Giannis 17/10,
+                                       # for this file only — config/carry.yaml stays true
 LOG_DIR: /opt/hermes/logs/carry-testnet
 ACCOUNT_TYPE: UNIFIED
 EARN_COIN: USDT

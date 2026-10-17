@@ -396,6 +396,9 @@ pytest                                   # οπουδήποτε· CI σε κάθ
   σταματήσει ο heartbeat, τίποτα άλλο δεν ανανεώνει: λήγει σε 30'.
   `tests/test_heartbeat_renewal.py`: 24 ώρες προσομοίωσης με τον πραγματικό
   κύκλο και heartbeat → 0 stale, 0 μηνύματα (ο παλιός κανόνας: 17–40 stale).
+- ✅ **17/10 — testnet έτοιμο:** `DRY_RUN: false` μόνο στο `carry.testnet.yaml`·
+  ακατέργαστες απαντήσεις (μόνο σώμα) στο `logs/carry-testnet/raw/`· βρόχος
+  `systemd-run --unit=yield-carry-testnet`. Εντολές: `DEPLOY.md`, «Carry — testnet».
 
 ## 9. Ανοιχτά — τι μένει
 
