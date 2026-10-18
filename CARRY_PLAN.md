@@ -560,4 +560,32 @@ tests `tests/test_carry_mainnet_roundtrip_20261017.py`, κλειδωμένα σ�
     - **Paper και live χωριστά.** Book `carry_paper_book.json` και ledger
       `<LOG_DIR>/paper/ledger/` για το DRY_RUN· οι παλιές γραμμές paper
       (`earn_interest`) φεύγουν από το live ledger αυτόματα (`LEDGER_SPLIT`).
+22. **18/10 — η μετάβαση σε live.** Το `config/carry.yaml` μένει για πάντα
+    `DRY_RUN: true`, και το `deploy.sh` αρνείται οτιδήποτε άλλο.
+    - **Live:** ο υπογεγραμμένος διακόπτης `state/carry_live.json`
+      (`carry/live.py`). Τον γράφει μόνο το `scripts/carry_live.py enable`:
+      - με τερματικό, κωδικό μίας χρήσης στο Telegram του Giannis και την
+        ακριβή φράση `LIVE <cap> USDT`·
+      - με όλους τους ελέγχους να περνούν: FLAT, NORMAL, Cross Margin,
+        collateral, DEADMAN_URL, πλήρης validation του live config.
+    - **Όριο κεφαλαίου:** υπογράφεται στον διακόπτη και δεν ανεβαίνει ποτέ
+      από το repo.
+    - **Disable:** μόνο όταν το carry είναι FLAT.
+    - **deploy.sh και roundtrip:** αρνούνται όσο υπάρχει ο διακόπτης.
+    - **Χωρίς έγκυρο διακόπτη με ανοιχτή live θέση:** live μόνο UNWIND, ως
+      FLAT.
+    - **`DEADMAN_URL`:** μόνο στο `/opt/hermes/.env`, ποτέ στο repo (null
+      εκεί, με test).
+23. **18/10 — live από το Telegram· APR πάνω από τα 100.** Ο Giannis δεν έχει SSH.
+    - **`/live enable <cap>`:** ίδιοι έλεγχοι με το CLI (`carry/live_ops.py`)·
+      μετά κωδικός μίας χρήσης 10 λεπτών, και επιβεβαίωση με
+      `/confirm <κωδικός> LIVE <cap> USDT`. Οι έλεγχοι ξανατρέχουν στο confirm.
+    - **`/live disable`:** με κωδικό, μόνο όταν το carry είναι FLAT.
+    - **Προστασίες:** μόνο το επιτρεπόμενο chat και ο επιτρεπόμενος
+      αποστολέας, όπως στο `/unwind`.
+    - **Αρχείο:** το ίδιο υπογεγραμμένο με το CLI· το CLI μένει.
+    - **`DEADMAN_URL`:** το γράφει ο Hermes στο `.env`.
+    - **Στρώμα A της εισόδου:** το APR του πάνω κομματιού του υπολοίπου που
+      αποσύρει η είσοδος (Earn + αδρανή USDT, έως το όριο θέσης και το
+      διαθέσιμο κεφάλαιο), όχι ο μέσος όρος (`plan.layer_a_apr`).
 

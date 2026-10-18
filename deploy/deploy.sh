@@ -27,7 +27,9 @@
 # Never: touches a systemd unit whose name does not start with "yield-",
 # edits a crontab, runs anything against testnet, prints a secret (keys are
 # shown as sha256 fingerprints), sets DRY_RUN, or installs anything into
-# /opt/hermes/.venv (the Hermes CLI's venv).
+# /opt/hermes/.venv (the Hermes CLI's venv). It never writes or removes the
+# carry's live switch (<state>/carry_live.json, scripts/carry_live.py), and
+# refuses to run at all while that switch exists.
 #
 # DRY_RUN is enforced: steps 5 and 7 start by checking that the config says
 # DRY_RUN: true (else FAIL before anything runs), the manual cycle runs with
@@ -146,6 +148,13 @@ step1_old_units() {
     if [[ $(systemctl is-active yield-carry-roundtrip.service 2>/dev/null || true) == active ]]; then
         echo "REFUSED: the supervised mainnet round trip (yield-carry-roundtrip) is running."
         echo "Deploy only after it has finished (it stops by itself after one round trip)."
+        return 1
+    fi
+    local live=${YIELD_CARRY_LIVE_FILE:-$HERMES_HOME/state/carry_live.json}
+    if [[ -e $live ]]; then
+        echo "REFUSED: the carry is LIVE ($live exists). deploy.sh never runs, restarts or"
+        echo "switches a live carry. Giannis: Telegram /unwind carry, wait for FLAT, then"
+        echo "scripts/carry_live.py disable; deploy; then carry_live.py enable again."
         return 1
     fi
     if [[ $SYSTEM == yield ]] && carry_enabled; then

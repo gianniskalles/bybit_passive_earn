@@ -3,7 +3,10 @@
 CYCLE_MINUTES). No LLM anywhere (principle 3).
 
 One cycle:
-  1. config (strict schema; unusable -> CONFIG_INCOMPLETE, nothing else)
+  1. config (strict schema; unusable -> CONFIG_INCOMPLETE, nothing else), as
+     carry/live.py makes it effective: DEADMAN_URL from the environment; live
+     only with Giannis's signed live switch (config/carry.yaml is always
+     DRY_RUN: true)
   2. carry risk state (own signed file); staleness/invalid only ever makes it
      more conservative. The hold latch (risk.py) adds NO_NEW_POSITIONS until
      the operator writes the carry risk state after it.
@@ -42,7 +45,7 @@ from carry import adopt as adopt_req
 from carry import book as book_store
 from carry import config as cc
 from carry import execute as ex
-from carry import ledger, risk
+from carry import ledger, live, risk
 from carry import snapshot as snapshot_mod
 from carry.paper import PaperExchange
 from carry.plan import FLAT, OPEN, plan_cycle
@@ -181,7 +184,8 @@ def run_cycle(cfg: Optional[Dict], env: Dict[str, str], client, *,
     if notifier is not None:
         notify_cycle(rec, notifier)
     if rc == 0 and not any(a.startswith("CYCLE_CRASH") for a in alerts):
-        ping = risk.deadman_ping(cfg.get("DEADMAN_URL"), opener=opener)
+        ping = risk.deadman_ping(env.get("DEADMAN_URL") or cfg.get("DEADMAN_URL"),
+                                 opener=opener)
         if ping:
             alerts.append(ping)
     return rec, rc
@@ -192,6 +196,15 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
            force_state=None) -> int:
     testnet = bool(getattr(client, "testnet", False))
     rec["testnet"] = testnet
+    live_force = None
+    if not config_error and isinstance(cfg, dict) and env.get("HERMES_RISK_HMAC_KEY"):
+        cfg, live_alerts, live_force, switch = live.effective(
+            cfg, env, settings.carry_live_file(), settings.carry_book_file(),
+            env["HERMES_RISK_HMAC_KEY"])
+        alerts.extend(live_alerts)
+        if switch is not None:
+            rec["live_switch"] = {"enabled_ms": switch["enabled_ms"], "by": switch["by"],
+                                  "capital_cap": switch["capital_cap"]}
     errors = [config_error] if config_error else cc.validate(
         cfg, testnet, alt_report=cc.read_alt_report(cc.ALT_REPORT_FILE), roundtrip=roundtrip)
     if errors:
@@ -225,6 +238,9 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
     if force_state:
         state = stricter(state, force_state)            # never laxer than the signed state
         rec["forced_state"] = force_state
+    if live_force:
+        state = stricter(state, live_force)             # live without a switch: UNWIND only
+        rec["forced_state"] = stricter(rec.get("forced_state", "NORMAL"), live_force)
     rec["risk_state"] = state
 
     # ---- book ------------------------------------------------------------------------
@@ -328,12 +344,16 @@ def funding_view(decisions, snap, cfg) -> Dict[str, Dict]:
     """Per symbol: the smoothed funding as an APR now, and what the entry rule
     needs it to be (ENTRY_MIN_EXPECTED_APR above layer A, decide.py) — the
     daily summary shows how close an entry is."""
-    layer_a = snap.earn.apr if snap.earn is not None else None
+    from carry.plan import layer_a_apr
     need = float(cfg["ENTRY_MIN_EXPECTED_APR"])
-    return {s: {"smoothed_apr": d.expected_apr, "layer_a_apr": layer_a,
-                "entry_min_expected_apr": need,
-                "required_apr": None if layer_a is None else need + layer_a}
-            for s, d in decisions.items()}
+    idle = snap.account.balance("USDT").wallet if snap.account is not None else 0.0
+    out = {}
+    for s, d in decisions.items():
+        layer_a = layer_a_apr(snap.earn, cfg, s, idle)
+        out[s] = {"smoothed_apr": d.expected_apr, "layer_a_apr": layer_a,
+                  "entry_min_expected_apr": need,
+                  "required_apr": None if layer_a is None else need + layer_a}
+    return out
 
 
 def notify_cycle(rec: Dict, notifier) -> None:

@@ -127,7 +127,8 @@ class PaperExchange:
             earn = Earn(snap.earn.product_id if snap.earn else product_id, "Available", rate,
                         0.0, self.s.earn_staked, orders,
                         snap.earn.min_stake if snap.earn else 1.0,
-                        headline_apr=headline, tiered=bool(tiers))
+                        headline_apr=headline, tiered=bool(tiers),
+                        tiers=tuple(tiers) if tiers else ())
         errors = {k: v for k, v in snap.errors.items()
                   if not (k.startswith("positions:") or k in ("account", "orders", "earn"))}
         if earn is None:

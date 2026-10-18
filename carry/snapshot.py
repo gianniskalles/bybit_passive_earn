@@ -250,6 +250,13 @@ class Earn:
     # amount staked; headline_apr is Bybit's estimateApr (the top tier).
     headline_apr: Optional[float] = None
     tiered: bool = False
+    tiers: Tuple = ()                 # (min, max, apr) when tiered
+
+    def slice_apr(self, lo: float, hi: float) -> float:
+        """The rate the tiers pay on the slice [lo, hi] of a balance (the
+        marginal rate of what an entry takes out of Earn, 18/10); the flat
+        rate for an untiered product."""
+        return slice_apr(self.tiers, lo, hi) if self.tiers else self.apr
 
     def order(self, order_link_id: str) -> Optional[EarnOrder]:
         for o in self.orders:
@@ -464,7 +471,8 @@ def read_earn(client, coin: str) -> Earn:
     apr = headline if tiered is None else tier_apr(tiered, staked)
     return Earn(pid, _s(p, "status", where), apr,
                 _opt_f(p, "redeemProcessingMinute"), staked, tuple(orders),
-                _opt_f(p, "minStakeAmount"), headline_apr=headline, tiered=tiered is not None)
+                _opt_f(p, "minStakeAmount"), headline_apr=headline, tiered=tiered is not None,
+                tiers=tiered or ())
 
 
 Tier = Tuple[float, float, float]           # (min, max or inf, apr)
@@ -500,6 +508,15 @@ def tier_apr(tiers: Tuple[Tier, ...], amount: float) -> float:
         return tiers[0][2]
     paid = sum(max(0.0, min(amount, hi) - lo) * apr for lo, hi, apr in tiers)
     return paid / amount
+
+
+def slice_apr(tiers: Tuple[Tier, ...], lo: float, hi: float) -> float:
+    """The tiers' rate on the slice [lo, hi]; an empty slice is the rate at lo."""
+    lo = max(lo, 0.0)
+    if hi <= lo:
+        return next(apr for t_lo, t_hi, apr in tiers if t_lo <= lo < t_hi)
+    paid = sum(max(0.0, min(hi, t_hi) - max(lo, t_lo)) * apr for t_lo, t_hi, apr in tiers)
+    return paid / (hi - lo)
 
 
 def tiers_of(product: Mapping) -> Optional[Tuple[Tier, ...]]:

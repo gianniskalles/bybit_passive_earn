@@ -546,6 +546,19 @@ def test_live_carry_config_installs_nothing(sandbox, tmp_path):
     assert sandbox.systemctl_mutations() == []
 
 
+@pytest.mark.parametrize("system", ["carry", "yield"])
+def test_deploy_refuses_while_the_live_switch_exists(sandbox, system):
+    """18/10: live is Giannis's signed switch; deploy never runs next to it."""
+    _as_carry_active(sandbox)
+    state = sandbox.hermes_home / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "carry_live.json").write_text("{}")
+    r = _deploy(sandbox, "--system", system)
+    assert "FAIL step 1/7" in r.stdout and "REFUSED: the carry is LIVE" in r.stdout
+    assert sandbox.systemctl_mutations() == []
+    assert not any("run_carry_cycle" in c or "install.sh" in c for c in sandbox.calls())
+
+
 def test_bad_system_argument(sandbox):
     r = _deploy(sandbox, "--system", "both")
     assert r.returncode == 2 and sandbox.calls() == []

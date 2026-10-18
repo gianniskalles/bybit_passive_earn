@@ -207,6 +207,9 @@ class Roundtrip:
         if self.base.get("DRY_RUN") is not True:
             p.append(f"{settings.carry_config_file()}: DRY_RUN must stay true (it is "
                      f"{self.base.get('DRY_RUN')!r}); the round trip never changes it")
+        if settings.carry_live_file().exists():
+            p.append(f"the live switch {settings.carry_live_file()} exists: the carry is live; "
+                     f"the round trip never runs next to it")
         active = self.timers_active()
         if active:
             p.append(f"carry timers still active: {active} — stop them first")

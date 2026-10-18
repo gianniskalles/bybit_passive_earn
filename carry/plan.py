@@ -375,9 +375,11 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
                 _redeem_step(sym, sb, None, False, now, cfg, earn, alerts, actions, updates)
             continue
         recent = sum(1 for t in sb.entry_times if now - 30 * DAY_MS < t <= now)
+        room = float(cfg["TOTAL_CAPITAL_CAP_USD"]) - buffer - open_notional
         view = FundingView(sym, now, usable.next_funding_time_ms, usable.funding_interval_min,
                            usable.previous_interval_min, usable.predicted_rate,
-                           usable.settled_rates, earn.apr if earn else None,
+                           usable.settled_rates,
+                           layer_a_apr(earn, cfg, sym, wallet_usdt - committed_usdt, room),
                            usable.basis_bps, usable.spread_bps)
         d = decide_symbol(view, PositionView(in_pos, sb.entered_ms, recent), params, risk_state=state)
         decisions[sym] = d
@@ -475,6 +477,24 @@ def _lost_book(sym: str, book: Mapping[str, SymbolBook], snap: Snapshot) -> bool
     m = snap.markets.get(sym)
     dust = m.spot.min_qty if m is not None else 0.0
     return snap.account.balance(sym[:-len("USDT")]).wallet > dust
+
+
+def layer_a_apr(earn, cfg: Mapping, sym: str, idle_usdt: float,
+                room: Optional[float] = None) -> Optional[float]:
+    """Layer A as the entry's opportunity cost (18/10, approved): an entry
+    takes its cost off the TOP of what would earn (Earn + idle USDT, which
+    goes back to Earn), so it gives up the rate of that top slice. With
+    tiers (6.94 % up to 100 USDT, 1.94 % above) that is the marginal rate,
+    not the average; with a flat rate both are the same."""
+    if earn is None:
+        return None
+    if not earn.tiers:
+        return earn.apr
+    total = earn.staked + max(idle_usdt, 0.0)
+    cost = min(notional_cap(cfg, sym), total)
+    if room is not None:
+        cost = min(cost, max(room, 0.0))
+    return earn.slice_apr(total - cost, total)
 
 
 def _required(cost: float, open_notional: float, buffer: float, slack: bool = True) -> float:
