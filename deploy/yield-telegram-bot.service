@@ -1,5 +1,5 @@
 [Unit]
-Description=Bybit Earn yield rotation — Telegram operator commands (/unwind, /resume)
+Description=Bybit Earn yield rotation and carry — Telegram operator commands (/unwind, /resume, /live)
 After=network-online.target
 Wants=network-online.target
 

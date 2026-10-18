@@ -455,11 +455,34 @@ deploy, οι παλιές γραμμές paper φεύγουν από το live l
 κλειδώνει), και το `deploy.sh` αρνείται οτιδήποτε άλλο.
 
 **Ο διακόπτης.** Live σημαίνει ένα υπογεγραμμένο αρχείο εκτός repo,
-`/opt/hermes/state/carry_live.json`. Το γράφει μόνο το
-`scripts/carry_live.py enable`, και μόνο:
-- σε τερματικό (όχι pipe, όχι agent)·
-- με κωδικό μίας χρήσης που έρχεται στο Telegram του Giannis·
-- με την ακριβή φράση `LIVE <cap> USDT`.
+`/opt/hermes/state/carry_live.json`. Υπάρχουν δύο τρόποι να γραφτεί. Και οι
+δύο κάνουν τους ίδιους ελέγχους (`carry/live_ops.py`) και γράφουν το ίδιο
+αρχείο:
+- **Telegram** (ο Giannis δεν έχει SSH):
+  `/live enable 100` → `/confirm <κωδικός> LIVE 100 USDT`.
+- **Τερματικός:** `scripts/carry_live.py enable --capital-cap 100`.
+
+**Προστασίες του Telegram** (ίδιες με το `/unwind`):
+- μόνο από το επιτρεπόμενο chat **και** τον επιτρεπόμενο αποστολέα· κάθε
+  άλλο μήνυμα αγνοείται χωρίς απάντηση·
+- πρώτα τρέχουν όλοι οι έλεγχοι. Αν κάτι λείπει: «❌ Not live» με τη λίστα, και
+  κανένας κωδικός·
+- κωδικός μίας χρήσης, ισχύει 10 λεπτά, μία μόνο προσπάθεια·
+- επιβεβαίωση μόνο με την ακριβή φράση `LIVE <cap> USDT` μετά τον κωδικό·
+- οι έλεγχοι τρέχουν **ξανά** στο `/confirm`, ώστε να πιαστεί ό,τι άλλαξε
+  στο μεταξύ.
+
+**Οι έλεγχοι:**
+- mainnet· το `carry.yaml` με `DRY_RUN: true` και `DEADMAN_URL: null`·
+- δεν υπάρχει ήδη διακόπτης·
+- στο `.env`: κλειδί HMAC, το κλειδί και το secret του subaccount, ένα
+  `DEADMAN_URL` με https·
+- το όριο είναι ≤ `TOTAL_CAPITAL_CAP_USD`, και το config του live περνά
+  πλήρη validation·
+- δεν τρέχει ο επιβλεπόμενος κύκλος·
+- το risk state είναι NORMAL, χωρίς CARRY_HOLD·
+- Cross Margin, ETH collateral On, θέσεις και Earn αναγνώσιμα·
+- το carry είναι FLAT (exchange και live book).
 
 **Το όριο κεφαλαίου.** Υπογράφεται μέσα στον διακόπτη. Μια μεταγενέστερη
 αλλαγή του `TOTAL_CAPITAL_CAP_USD` στο repo δεν το ανεβάζει ποτέ.
@@ -477,65 +500,64 @@ deploy, οι παλιές γραμμές paper φεύγουν από το live l
 
 Το τελευταίο υπάρχει για να μη μείνει ποτέ πραγματική θέση χωρίς διαχείριση.
 
-**DEADMAN_URL:** μόνο στο `/opt/hermes/.env`, ποτέ στο repo. Χωρίς αυτό ένας
-κύκλος live δεν τρέχει καθόλου (`CONFIG_INCOMPLETE`). Αν μπει νωρίτερα, το
-pingάρουν και οι κύκλοι paper: έτσι ελέγχεται πριν το live.
+**DEADMAN_URL:** μόνο στο `/opt/hermes/.env`, ποτέ στο repo. Το γράφει ο
+Hermes· δεν είναι μυστικό υψηλής αξίας. Χωρίς αυτό ένας κύκλος live δεν τρέχει
+καθόλου (`CONFIG_INCOMPLETE`). Το pingάρουν και οι κύκλοι paper, άρα ελέγχεται
+πριν το live.
 
 ### Hermes (πριν το live)
 
 ```bash
 PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
 cd $REPO && sudo -u hermes git pull --ff-only origin main
-sudo $REPO/deploy/deploy.sh --system carry      # paper, όπως πάντα
-# μετά που ο Giannis έβαλε το DEADMAN_URL στο .env:
+sudo $REPO/deploy/deploy.sh --system carry      # paper, όπως πάντα· επανεκκινεί και το bot
+# DEADMAN_URL (το ping URL που έδωσε ο Giannis) στο .env:
+sudo -u hermes sh -c 'grep -q "^DEADMAN_URL=" /opt/hermes/.env || \
+    echo "DEADMAN_URL=https://hc-ping.com/<uuid>" >> /opt/hermes/.env'
 sudo -u hermes env HOME=/opt/hermes $PY $REPO/deploy/preflight.py keys --system carry
 #   DEADMAN_URL: OK (from the .env; never in the repo)  sha256:...
-journalctl -u yield-carry-cycle --since -15min --no-pager | tail -n 5
+systemctl is-active yield-telegram-bot.service           # active
 sudo -u hermes env HOME=/opt/hermes $PY $REPO/scripts/carry_live.py status
 #   paper (DRY_RUN): no live switch ...   carry exposure: FLAT
 ```
 
-Ο Hermes **δεν** τρέχει ποτέ `carry_live.py enable` ή `disable`.
+Ο Hermes **δεν** ενεργοποιεί ποτέ το live (ούτε `/live`, ούτε
+`carry_live.py enable`/`disable`).
 
 ### Giannis
 
 1. **healthchecks.io:**
    - νέο check «carry», period 5 λεπτά, grace 15 λεπτά·
    - ειδοποίηση στο email ή στο Telegram σου·
-   - αντιγράφεις το ping URL.
-2. **`.env`** (`sudoedit /opt/hermes/.env`): προσθέτεις
-   `DEADMAN_URL=https://hc-ping.com/...`. Μετά από 1–2 κύκλους paper, το check
-   στο healthchecks.io γίνεται πράσινο.
+   - δίνεις το ping URL στον Hermes.
+2. **Έλεγχος του deadman:** μετά από 1–2 κύκλους paper, το check στο
+   healthchecks.io γίνεται πράσινο.
 3. **Bybit UI**, όπως στους επιβλεπόμενους κύκλους:
    - Cross Margin·
    - ETH collateral On·
-   - το Earn του subaccount όπως το θέλεις (βλ. το όριο των 100 USDT πιο κάτω).
-4. **Ενεργοποίηση, σε δικό σου τερματικό** (ssh):
-   ```bash
-   sudo -u hermes env HOME=/opt/hermes /opt/hermes/venvs/yield_rotation/bin/python \
-       /opt/hermes/yield_rotation/scripts/carry_live.py enable --capital-cap 100
-   ```
-   Τυπώνει τους ελέγχους. Αν κάτι λείπει, αρνείται και λέει τι.
-
-   Αν περάσουν, στέλνει κωδικό στο Telegram σου. Τον πληκτρολογείς, μετά τη
-   φράση `LIVE 100 USDT`.
-
-   Ο επόμενος κύκλος κάνει live συναλλαγές· στο Telegram έρχεται
-   «🟢 CARRY LIVE enabled».
-5. **Σταμάτημα:**
-   - Telegram `/unwind carry`·
+   - το Earn του subaccount όπως το θέλεις.
+4. **Στο Telegram:** `/live` δείχνει paper και exposure FLAT.
+5. **Ενεργοποίηση:** `/live enable 100`.
+   - Αν κάτι λείπει, απαντά «❌ Not live» με τη λίστα.
+   - Αλλιώς απαντά με κωδικό.
+   - Μέσα σε 10 λεπτά στέλνεις ακριβώς `/confirm <κωδικός> LIVE 100 USDT`.
+   - Απάντηση: «🟢 CARRY LIVE». Ο επόμενος κύκλος κάνει live συναλλαγές.
+6. **Σταμάτημα:**
+   - `/unwind carry`·
    - περιμένεις FLAT·
-   - μετά `... carry_live.py disable`. Το disable αρνείται όσο υπάρχει θέση.
+   - `/live disable` και μετά `/confirm <κωδικός>`. Το disable αρνείται όσο
+     υπάρχει θέση.
 
    Για νέο deploy: disable → deploy → enable ξανά.
 
-**Όριο 100 USDT της κλίμακας του Earn.** Το APR του Earn είναι ο μέσος όρος
-των κλιμάκων στο ποσό: 6,94% ως 100 USDT, 1,94% πάνω από αυτά.
+**Όριο 100 USDT της κλίμακας του Earn (διόρθωση 18/10).** Η είσοδος παίρνει
+το κόστος της από το **πάνω** κομμάτι του υπολοίπου (Earn + αδρανή USDT).
+Γι' αυτό το στρώμα A της απόφασης εισόδου είναι το APR αυτού του κομματιού.
 
-Μια είσοδος όμως αποσύρει το **πάνω** κομμάτι του υπολοίπου. Πάνω από 100
-USDT, το κόστος ευκαιρίας της είναι το 1,94% και όχι ο μέσος όρος. Έτσι το
-carry μπαίνει δυσκολότερα απ' όσο θα έπρεπε. Αυτό είναι συντηρητικό, όχι
-επικίνδυνο.
+Παράδειγμα με 150 USDT στο Earn και όριο θέσης 80: το κομμάτι [70, 150] είναι
+30 USDT στο 6,94% και 50 στο 1,94%, άρα 3,82%. Ο μέσος όρος σε όλο το ποσό
+θα ήταν 5,27%.
 
-Με ≤ 100 USDT στο Earn του subaccount, μέσος όρος και πραγματικό κόστος
-συμπίπτουν (6,94%).
+Ως 100 USDT είναι πάντα 6,94%. Η ημερήσια σύνοψη δείχνει:
+- «Earn: X%»: ο μέσος όρος, όσο πραγματικά αποδίδει το Earn·
+- «χρειάζεται Y%»: το κατώφλι εισόδου, πάνω στο κομμάτι.

@@ -354,7 +354,8 @@ def test_status_reports_the_switch(ready):
 
 def tiered(staked):
     t = sn.tiers_of({"hasTieredApr": True, "tierAprDetails": TIERS})
-    return earn(staked=staked, apr=sn.tier_apr(t, staked))
+    return sn.Earn("1", "Available", sn.tier_apr(t, staked), 0.0, staked, (), 1.0,
+                   headline_apr=0.0194, tiered=True, tiers=t)
 
 
 @pytest.mark.parametrize("staked,apr", [(57.17, 0.0694), (99.99, 0.0694), (100.0, 0.0694),
@@ -374,12 +375,12 @@ def test_the_paper_interest_is_paid_tier_by_tier():
 
 
 def test_the_entry_hurdle_on_either_side_of_100():
-    """The same funding (~14 % APR): with 57 or 100 USDT in Earn the layer A
-    rate is 6.94 % and the MIN_HOLD payback fails: the carry stays out; with
-    150 USDT the average rate on the whole amount (5.27 %) is layer A, and
-    it enters. AUDIT note of 18/10 (live
-    readiness): the entry gives up the TOP slice of the Earn balance, so its
-    true cost is the marginal rate (1.94 % above 100), not the average."""
+    """The same funding (~14 % APR). An entry takes its cost (up to the 80
+    USDT notional limit) off the TOP of the Earn balance, so layer A is the
+    marginal rate of that slice (18/10, approved): up to 100 USDT it is
+    6.94 % and the MIN_HOLD payback fails; with 150 USDT the slice
+    [70, 150] is 30 at 6.94 % + 50 at 1.94 % = 3.82 %, and it enters (the
+    average on the whole amount, 5.27 %, would have overstated the cost)."""
     m = market(rate=0.00013, settled=[0.00013] * 12)          # ~14 % APR
     decisions = {}
     for staked in (57.17, 100.0, 150.0):
@@ -388,7 +389,37 @@ def test_the_entry_hurdle_on_either_side_of_100():
         decisions[staked] = d
     assert decisions[57.17].action == decisions[100.0].action == "STAY_OUT"
     assert "MIN_HOLD income" in decisions[100.0].reason
-    assert decisions[150.0].action == "ENTER" and "0.0527" in decisions[150.0].reason
+    assert decisions[150.0].action == "ENTER" and "layer A 0.0382" in decisions[150.0].reason
+
+
+@pytest.mark.parametrize("staked,idle,room,apr", [
+    (57.17, 0.0, None, 0.0694),                                  # all in the first tier
+    (100.0, 0.0, None, 0.0694),
+    (150.0, 0.0, None, (30 * 0.0694 + 50 * 0.0194) / 80),        # [70, 150]
+    (120.0, 0.0, None, (60 * 0.0694 + 20 * 0.0194) / 80),        # [40, 120]
+    (300.0, 0.0, None, 0.0194),                                  # [220, 300]: all above 100
+    (90.0, 20.0, None, (70 * 0.0694 + 10 * 0.0194) / 80),        # idle USDT counts: [30, 110]
+    (150.0, 0.0, 25.0, 0.0194),                                  # only 25 of room: [125, 150]
+])
+def test_layer_a_is_the_marginal_rate_of_the_entry(staked, idle, room, apr):
+    from carry.plan import layer_a_apr
+    cfg = base_cfg(SYMBOLS=["ETHUSDT"])
+    assert cfg["MAX_NOTIONAL_PER_SYMBOL_USD"] == 80
+    assert layer_a_apr(tiered(staked), cfg, "ETHUSDT", idle, room) == pytest.approx(apr)
+
+
+def test_a_flat_rate_is_layer_a_as_it_is():
+    from carry.plan import layer_a_apr
+    assert layer_a_apr(earn(staked=500.0, apr=0.0173), base_cfg(), "ETHUSDT", 0.0) == 0.0173
+    assert layer_a_apr(None, base_cfg(), "ETHUSDT", 0.0) is None
+
+
+def test_the_daily_summary_threshold_uses_the_same_rate():
+    decisions = {"ETHUSDT": type("D", (), {"expected_apr": 0.12})()}
+    snap = snapshot(earn_=tiered(150.0), acct=account(usdt=0.0))
+    f = rcc.funding_view(decisions, snap, base_cfg(SYMBOLS=["ETHUSDT"]))["ETHUSDT"]
+    assert f["layer_a_apr"] == pytest.approx((30 * 0.0694 + 50 * 0.0194) / 80)
+    assert f["required_apr"] == pytest.approx(0.05 + f["layer_a_apr"])
 
 
 def test_returning_to_earn_across_100_is_one_stake():
@@ -399,3 +430,118 @@ def test_returning_to_earn_across_100_is_one_stake():
     plan = plan_cycle(snap, base_cfg(SYMBOLS=["ETHUSDT"]), "NO_NEW_POSITIONS", {}, "c")
     [a] = [x for x in plan.actions if x.kind == "EARN_RETURN"]
     assert a.usdt == 29.23
+
+
+# --- Telegram /live (18/10: Giannis has no shell on the server) ---------------------------- #
+
+from carry import live_ops  # noqa: E402
+from telegram_bot import LIVE_TTL_S, CommandBot  # noqa: E402
+
+CHAT = "4242"
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def bot(env=None, snap=flat_snap, clock=None):
+    env = {"HERMES_RISK_HMAC_KEY": KEY, "BYBIT_CARRY_API_KEY": "k", "BYBIT_CARRY_API_SECRET": "s",
+           "DEADMAN_URL": DEADMAN} if env is None else env
+    ops = lambda: live_ops.LiveOps(base_cfg(DEADMAN_URL=None), env, object(),  # noqa: E731
+                                   now_ms=lambda: NOW, snapshot_fn=snap,
+                                   roundtrip_active=lambda: False)
+    return CommandBot(CHAT, lambda s, r: None, lambda: "status", clock=clock or Clock(),
+                      new_code=lambda: "123456", live=ops)
+
+
+def say(b, text, chat=CHAT, sender=CHAT):
+    r = b.handle({"message": {"chat": {"id": chat}, "from": {"id": sender}, "text": text}})
+    return None if r is None else r[1]
+
+
+def test_live_enable_over_telegram(ready):
+    b = bot()
+    r = say(b, "/live enable 100")
+    assert "All checks pass" in r and "/confirm 123456 LIVE 100 USDT" in r
+    r = say(b, "/confirm 123456 LIVE 100 USDT")
+    assert r.startswith("🟢 CARRY LIVE"), r
+    body, broken = live.read(ready["switch"], KEY)
+    assert broken is None and body["capital_cap"] == 100.0 and body["by"] == f"telegram chat {CHAT}"
+    assert say(b, "/confirm 123456 LIVE 100 USDT") == "Nothing to confirm."    # one use
+
+
+@pytest.mark.parametrize("chat,sender", [("999", CHAT), (CHAT, "999"), ("999", "999")])
+def test_live_only_from_the_allowed_chat_and_sender(ready, chat, sender):
+    b = bot()
+    assert say(b, "/live enable 100", chat=chat, sender=sender) is None
+    assert say(b, "/live disable", chat=chat, sender=sender) is None
+    assert b.pending is None
+    say(b, "/live enable 100")
+    assert say(b, "/confirm 123456 LIVE 100 USDT", chat=chat, sender=sender) is None
+    assert not ready["switch"].exists()
+
+
+@pytest.mark.parametrize("confirm", ["/confirm 123456", "/confirm 123456 LIVE 50 USDT",
+                                     "/confirm 123456 live 100 usdt", "/confirm 654321 LIVE 100 USDT",
+                                     "/confirm 123456 LIVE 100 USDT please"])
+def test_live_enable_needs_the_code_and_the_exact_phrase(ready, confirm):
+    b = bot()
+    say(b, "/live enable 100")
+    r = say(b, confirm)
+    assert r.startswith(("Wrong", "❌")) and not ready["switch"].exists(), r
+    assert say(b, "/confirm 123456 LIVE 100 USDT") == "Nothing to confirm."    # one try
+
+
+def test_the_code_lives_ten_minutes(ready):
+    clock = Clock()
+    b = bot(clock=clock)
+    say(b, "/live enable 100")
+    clock.t += LIVE_TTL_S + 1
+    assert "expired" in say(b, "/confirm 123456 LIVE 100 USDT")
+    say(b, "/live enable 100")
+    clock.t += LIVE_TTL_S - 5
+    assert say(b, "/confirm 123456 LIVE 100 USDT").startswith("🟢")
+    assert LIVE_TTL_S == 600
+
+
+def test_live_enable_refuses_with_the_same_checks_as_the_cli(ready):
+    b = bot(env={"HERMES_RISK_HMAC_KEY": KEY, "BYBIT_CARRY_API_KEY": "k",
+                 "BYBIT_CARRY_API_SECRET": "s"})
+    r = say(b, "/live enable 100")
+    assert r.startswith("❌ Not live") and "DEADMAN_URL" in r and b.pending is None
+    b = bot(snap=open_snap)
+    assert "not FLAT" in say(b, "/live enable 100")
+    assert "capital cap 500.0 must be" in say(bot(), "/live enable 500")
+    assert say(bot(), "/live enable lots").startswith("Usage")
+
+
+def test_the_checks_run_again_at_confirm(ready):
+    from carry import risk
+    b = bot()
+    say(b, "/live enable 100")
+    risk.write_hold(settings.carry_hold_file(), "orphan protection", NOW)
+    r = say(b, "/confirm 123456 LIVE 100 USDT")
+    assert r.startswith("❌ Nothing changed") and "CARRY_HOLD" in r
+    assert not ready["switch"].exists()
+
+
+def test_live_disable_over_telegram_only_when_flat(ready):
+    live.write(ready["switch"], KEY, 100.0, ["ETHUSDT"], "giannis", NOW)
+    b = bot(snap=open_snap)
+    assert "/confirm 123456" in say(b, "/live disable")
+    r = say(b, "/confirm 123456")
+    assert r.startswith("❌ Nothing changed") and "/unwind carry" in r and ready["switch"].exists()
+    b = bot()
+    say(b, "/live disable")
+    assert say(b, "/confirm 123456").startswith("⚪ CARRY back to paper")
+    assert not ready["switch"].exists()
+
+
+def test_live_status_over_telegram(ready):
+    assert say(bot(), "/live").startswith("paper (DRY_RUN)")
+    live.write(ready["switch"], KEY, 100.0, ["ETHUSDT"], "giannis", NOW)
+    assert say(bot(), "/live status").startswith("LIVE:")

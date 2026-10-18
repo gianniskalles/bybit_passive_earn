@@ -8,9 +8,17 @@
   /resume carry    the same; an operator write also releases a CARRY_HOLD
   /unwind all      UNWIND for both systems
   /adopt carry     ask to adopt a lost carry book (decision 13.15) -> one-time code
-  /confirm <code>  second message: writes the state(s) with source=operator, or
-                   the signed single-use carry adopt request
+  /live            the carry's live switch and exposure
+  /live enable <cap>  ask to run the carry with real money (18/10): every check of
+                   carry/live_ops.py first, then a one-time code valid
+                   LIVE_TTL_S, confirmed with "/confirm <code> LIVE <cap> USDT"
+  /live disable    ask to go back to paper -> one-time code (only while FLAT)
+  /confirm <code>  second message: writes the state(s) with source=operator, the
+                   signed single-use carry adopt request, or the live switch
   /cancel          drop the pending request
+
+/live writes the same signed switch as scripts/carry_live.py (carry/live.py);
+config/carry.yaml stays DRY_RUN: true. The checks run again at /confirm.
 
 Only messages whose chat.id AND from.id equal the configured
 ALERT_TELEGRAM_CHAT_ID are accepted; everything else is ignored without a
@@ -41,6 +49,7 @@ from carry import adopt
 from notify import chat_id as configured_chat_id
 
 CONFIRM_TTL_S = 120
+LIVE_TTL_S = 600
 TARGETS = {"/unwind": "UNWIND", "/resume": "NORMAL"}
 # (command, argument) -> systems. /resume all does not exist: resuming is a
 # decision per system.
@@ -48,7 +57,7 @@ SCOPES = {("/unwind", None): ("yield",), ("/resume", None): ("yield",),
           ("/unwind", "carry"): ("carry",), ("/resume", "carry"): ("carry",),
           ("/unwind", "all"): ("yield", "carry")}
 HELP = ("Commands: /status, /unwind, /resume, /unwind carry, /resume carry, /unwind all, "
-        "/adopt carry, /confirm <code>, /cancel")
+        "/adopt carry, /live, /live enable <cap>, /live disable, /confirm <code>, /cancel")
 
 
 class CommandBot:
@@ -58,7 +67,8 @@ class CommandBot:
                  clock: Callable[[], float] = time.time,
                  new_code: Callable[[], str] = lambda: f"{secrets.randbelow(10**6):06d}",
                  request_adopt: Optional[Callable[[str], None]] = None,
-                 write_carry_state: Optional[Callable[[str, str], None]] = None):
+                 write_carry_state: Optional[Callable[[str, str], None]] = None,
+                 live: Optional[Callable[[], object]] = None):
         self.allowed = str(allowed_chat_id)
         self.write_state = write_state
         self.writers = {"yield": write_state, "carry": write_carry_state}
@@ -66,6 +76,7 @@ class CommandBot:
         self.clock = clock
         self.new_code = new_code
         self.request_adopt = request_adopt
+        self.live = live                  # () -> carry.live_ops.LiveOps, built per command
         self.pending: Optional[Dict[str, object]] = None
 
     def handle(self, update: Dict) -> Optional[Tuple[str, str]]:
@@ -103,6 +114,8 @@ class CommandBot:
             self.pending = {"adopt": True, "code": code, "expires": self.clock() + CONFIRM_TTL_S}
             return chat, (f"Adopt the carry position into the book (min(short, spot), no trade)? "
                           f"Reply /confirm {code} within {CONFIRM_TTL_S // 60} min, or /cancel.")
+        if cmd == "/live" and self.live is not None:
+            return chat, self._live(chat, words[1:])
         if cmd == "/cancel":
             self.pending = None
             return chat, "Cancelled."
@@ -112,7 +125,11 @@ class CommandBot:
                 return chat, "Nothing to confirm."
             if self.clock() > pending["expires"]:
                 return chat, "Confirmation expired. Send the command again."
-            if len(words) != 2 or not secrets.compare_digest(words[1], str(pending["code"])):
+            if len(words) < 2 or not secrets.compare_digest(words[1], str(pending["code"])):
+                return chat, "Wrong code. Send the command again."
+            if pending.get("live"):
+                return chat, self._live_confirm(chat, pending, words[2:])
+            if len(words) != 2:
                 return chat, "Wrong code. Send the command again."
             if pending.get("adopt"):
                 try:
@@ -137,6 +154,63 @@ class CommandBot:
             lines.append(self.read_status())
             return chat, "\n".join(lines)
         return chat, HELP
+
+
+    # ---- /live --------------------------------------------------------------------
+    def _live(self, chat: str, args) -> str:
+        from carry import live_ops
+        try:
+            ops = self.live()
+        except Exception as e:                                      # noqa: BLE001
+            return f"❌ Live switch unavailable: {type(e).__name__}: {e}"
+        if not args or args == ["status"]:
+            return "\n".join(ops.status())
+        if args == ["disable"]:
+            code = self.new_code()
+            self.pending = {"live": "disable", "code": code, "expires": self.clock() + LIVE_TTL_S}
+            return (f"Back to paper (only if the carry is FLAT)? Reply /confirm {code} within "
+                    f"{LIVE_TTL_S // 60} min, or /cancel.")
+        if len(args) == 2 and args[0] == "enable":
+            try:
+                cap = float(args[1])
+            except ValueError:
+                return "Usage: /live enable <capital cap in USDT>, e.g. /live enable 100"
+            try:
+                problems = ops.problems(cap)
+            except Exception as e:                                  # noqa: BLE001
+                return f"❌ Not live: the checks failed to run: {type(e).__name__}: {e}"
+            if problems:
+                return "❌ Not live:\n- " + "\n- ".join(problems)
+            code = self.new_code()
+            self.pending = {"live": "enable", "cap": cap, "code": code,
+                            "expires": self.clock() + LIVE_TTL_S}
+            return (f"All checks pass. Run the carry with REAL MONEY, capital cap {cap:g} USDT? "
+                    f"Within {LIVE_TTL_S // 60} min reply exactly:\n/confirm {code} "
+                    f"{live_ops.phrase(cap)}\nor /cancel.")
+        return "Usage: /live, /live enable <cap>, /live disable"
+
+    def _live_confirm(self, chat: str, pending: Dict, rest) -> str:
+        from carry import live_ops
+        try:
+            ops = self.live()
+            if pending["live"] == "enable":
+                cap = float(pending["cap"])
+                if " ".join(rest) != live_ops.phrase(cap):
+                    return (f"Wrong phrase (it is \"{live_ops.phrase(cap)}\"); nothing changed. "
+                            f"Send /live enable again.")
+                body = ops.enable(cap, f"telegram chat {chat}")
+                return (f"🟢 CARRY LIVE: the next carry cycle trades real money (capital cap "
+                        f"{body['capital_cap']:g} USDT, symbols {body['symbols']}). Stop: "
+                        f"/unwind carry, wait for FLAT, then /live disable.")
+            if rest:
+                return "Wrong code. Send the command again."
+            if not ops.disable():
+                return "Paper already: there is no live switch."
+            return "⚪ CARRY back to paper (DRY_RUN): the live switch is removed."
+        except live_ops.LiveRefused as e:
+            return f"❌ Nothing changed: {e}"
+        except Exception as e:                                      # noqa: BLE001
+            return f"❌ Nothing changed: {type(e).__name__}: {e}"
 
 
 def _names(systems) -> str:
@@ -197,8 +271,12 @@ def main() -> int:
     def request_adopt(who: str) -> None:
         adopt.write_request(settings.carry_adopt_file(), key, who, int(time.time() * 1000))
 
+    def live() -> object:
+        from carry import live_ops
+        return live_ops.from_env(settings.load_env())    # the .env as it is now
+
     bot = CommandBot(allowed, write_state, read_status, request_adopt=request_adopt,
-                     write_carry_state=write_carry_state)
+                     write_carry_state=write_carry_state, live=live)
     # Discard anything queued while the bot was down.
     backlog = _api(token, "getUpdates", {"offset": -1, "timeout": 0}).get("result", [])
     offset = backlog[-1]["update_id"] + 1 if backlog else 0

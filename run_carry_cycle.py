@@ -344,12 +344,16 @@ def funding_view(decisions, snap, cfg) -> Dict[str, Dict]:
     """Per symbol: the smoothed funding as an APR now, and what the entry rule
     needs it to be (ENTRY_MIN_EXPECTED_APR above layer A, decide.py) — the
     daily summary shows how close an entry is."""
-    layer_a = snap.earn.apr if snap.earn is not None else None
+    from carry.plan import layer_a_apr
     need = float(cfg["ENTRY_MIN_EXPECTED_APR"])
-    return {s: {"smoothed_apr": d.expected_apr, "layer_a_apr": layer_a,
-                "entry_min_expected_apr": need,
-                "required_apr": None if layer_a is None else need + layer_a}
-            for s, d in decisions.items()}
+    idle = snap.account.balance("USDT").wallet if snap.account is not None else 0.0
+    out = {}
+    for s, d in decisions.items():
+        layer_a = layer_a_apr(snap.earn, cfg, s, idle)
+        out[s] = {"smoothed_apr": d.expected_apr, "layer_a_apr": layer_a,
+                  "entry_min_expected_apr": need,
+                  "required_apr": None if layer_a is None else need + layer_a}
+    return out
 
 
 def notify_cycle(rec: Dict, notifier) -> None:
