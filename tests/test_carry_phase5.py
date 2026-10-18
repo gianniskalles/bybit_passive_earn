@@ -114,7 +114,12 @@ def test_ledger_summary_and_round_trip(tmp_path):
          "filled": 0.03, "avg_price": 2600.0, "fee": 0.07},
         {"type": "order", "symbol": "ETHUSDT", "action": "CLOSE", "leg": "perp", "side": "Buy",
          "filled": 0.03, "avg_price": 2600.5, "fee": 0.04}], NOW)
-    assert rt["pnl"] == pytest.approx(0.03 * 2500 - 0.03004 * 2500.2 + 0.03 * 2600 - 0.03 * 2600.5)
+    # Cash flows, plus the coin fee given back (it is in `fees` only), plus
+    # the coin kept (0.03004 - 0.00003 - 0.03 = 0.00001 ETH) at the last spot
+    # price (audit of 18/10: never counted twice, never counted as spent).
+    cash = 0.03 * 2500 - 0.03004 * 2500.2 + 0.03 * 2600 - 0.03 * 2600.5
+    assert rt["kept_qty"] == pytest.approx(0.00001)
+    assert rt["pnl"] == pytest.approx(cash + 0.00003 * 2500.2 + 0.00001 * 2600.0)
 
 
 def test_underperformance_needs_a_full_window_then_compares_with_expected():
@@ -233,7 +238,7 @@ def test_bullish_regime_enters_holds_collects_funding_and_exits(carry_env):
     assert redeem and enter and len(enter) == 1                       # redeem, then the legs
     assert bull_start <= redeem[0]["cycle_ms"] < enter[0]["cycle_ms"] < bull_start + 3 * 24 * H
     assert len(exits) == 1 and neg_start < exits[0]["cycle_ms"] < neg_start + 4 * 24 * H
-    rows = ledger.read(carry_env["log_dir"])
+    rows = ledger.read(ledger.home(carry_env["log_dir"], True))          # the paper ledger
     s = ledger.summary(rows)
     assert s["funding"] > 0 and s["fees"] > 0
     assert s["funding"] == pytest.approx(s["expected_funding"], rel=1e-9)  # paper = expected
@@ -299,7 +304,7 @@ def test_liquidation_sells_the_orphan_spot_in_the_same_cycle(carry_env):
 def test_lost_book_holds_until_adopt_and_operator_release(carry_env):
     regime = Regime([(40, 0.0003)])
     t = _entered(carry_env, regime)
-    settings.carry_book_file().unlink()                                # the book is lost
+    settings.carry_book_file(paper=True).unlink()                      # the book is lost
     rec, _ = cycle(carry_env, regime, t + 2 * H)
     assert any(a.startswith("BOOK_MISMATCH") for a in rec["alerts"]) and rec["orders"] == []
     assert risk.read_hold(settings.carry_hold_file())
@@ -392,7 +397,7 @@ def test_bullish_regime_with_a_rising_price_stays_delta_neutral(carry_env):
     start, span = regime0.start, 45 * 24 * H
     regime = Regime(BULL, price=lambda t: 2500.0 * (1 + 0.2 * min(1.0, max(0.0, (t - start) / span))))
     run_all(carry_env, regime)
-    rows = ledger.read(carry_env["log_dir"])
+    rows = ledger.read(ledger.home(carry_env["log_dir"], True))          # the paper ledger
     [rt] = [r for r in rows if r["type"] == "round_trip"]
     assert abs(rt["pnl"]) < 0.5                                         # < 0.7 % of notional
     s = ledger.summary(rows)

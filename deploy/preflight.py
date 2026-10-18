@@ -392,31 +392,39 @@ def cmd_carry_exposure(args: List[str]) -> int:
 
 
 def cmd_carry_reset_book_if_invalid(args: List[str]) -> int:
-    path = settings.carry_book_file()
+    """The live book and the DRY_RUN book (separate since 18/10), each under
+    the same rule: an unreadable book is moved aside only while the carry
+    holds nothing (exchange, paper account, books)."""
     key = settings.load_env().get("HERMES_RISK_HMAC_KEY", "")
     if not key:
         print("ERROR: HERMES_RISK_HMAC_KEY not set")
         return 1
-    if not path.exists():
-        print(f"{path} absent — the first carry cycle starts an empty book")
-        return 0
     from carry import book as carry_book
-    book, alert = carry_book.load(path, key)
-    if alert is None:
-        print(f"keep: carry book verifies ({len(book)} symbol(s))")
-        return 0
-    e = carry_exposure()
-    _print_exposure(e)
-    if not e.flat:
-        print(f"ERROR: the carry book is unreadable ({alert}) and the carry holds positions or "
-              f"cannot be read ({e.verdict}). deploy never resets the book while the exchange "
-              f"shows positions. Restore the HMAC key it was signed with, or recover with "
-              f"Telegram /adopt carry once the carry cycle reports BOOK_MISMATCH.")
-        return 1
-    aside = path.with_name(f"{path.name}.unreadable.{_stamp()}")
-    os.replace(path, aside)
-    print(f"moved the unreadable carry book ({alert}) to {aside}; the carry holds nothing")
-    return 0
+    rc, exposure = 0, None
+    for name, path in (("carry book", settings.carry_book_file()),
+                       ("carry paper book", settings.carry_book_file(paper=True))):
+        if not path.exists():
+            print(f"{path} absent — the first carry cycle starts an empty book")
+            continue
+        book, alert = carry_book.load(path, key)
+        if alert is None:
+            print(f"keep: {name} verifies ({len(book)} symbol(s))")
+            continue
+        if exposure is None:
+            exposure = carry_exposure()
+            _print_exposure(exposure)
+        if not exposure.flat:
+            print(f"ERROR: the {name} is unreadable ({alert}) and the carry holds positions or "
+                  f"cannot be read ({exposure.verdict}). deploy never resets the book while the "
+                  f"exchange shows positions. Restore the HMAC key it was signed with, or "
+                  f"recover with Telegram /adopt carry once the carry cycle reports "
+                  f"BOOK_MISMATCH.")
+            rc = 1
+            continue
+        aside = path.with_name(f"{path.name}.unreadable.{_stamp()}")
+        os.replace(path, aside)
+        print(f"moved the unreadable {name} ({alert}) to {aside}; the carry holds nothing")
+    return rc
 
 
 def _verify(system: str):

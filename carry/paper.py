@@ -30,7 +30,7 @@ from typing import Dict, List, Optional
 
 from bybit_earn_tool import BybitAPIError
 from carry.snapshot import (Account, CoinBalance, Collateral, Earn, EarnOrder, PerpPosition,
-                            Snapshot)
+                            Snapshot, tier_apr)
 
 YEAR_MS = 365 * 24 * 3600 * 1000
 PERP_MM_RATE = 0.005          # paper maintenance margin per unit of perp notional
@@ -84,8 +84,15 @@ class PaperExchange:
         os.replace(tmp, path)
 
     # ---- the account the plan sees -------------------------------------------------
+    def rate(self, apr: Optional[float], tiers=None) -> Optional[float]:
+        """Layer A on the paper amount: the tiers when the product has them
+        (snapshot.tier_apr), else the flat rate."""
+        if tiers and apr is not None:
+            return tier_apr(tiers, self.s.earn_staked)
+        return apr
+
     def overlay(self, snap: Snapshot, apr: Optional[float] = None,
-                product_id: str = "paper") -> Snapshot:
+                product_id: str = "paper", tiers=None) -> Snapshot:
         self.snap = snap
         positions = {}
         for sym in snap.symbols:
@@ -109,7 +116,9 @@ class PaperExchange:
             s[:-4]: Collateral(1.0, True, True) for s in snap.symbols}
         account = Account("REGULAR_MARGIN", mm, mm * 2, MappingProxyType(coins),
                           MappingProxyType(fees), MappingProxyType(coll))
-        rate = apr if apr is not None else (snap.earn.apr if snap.earn is not None else None)
+        headline = apr
+        rate = self.rate(apr, tiers) if apr is not None else (
+            snap.earn.apr if snap.earn is not None else None)
         earn = None
         if rate is not None:
             orders = tuple(EarnOrder(o["orderId"], link, o["orderType"], o["status"],
@@ -117,7 +126,8 @@ class PaperExchange:
                            for link, o in self.s.earn_orders.items())
             earn = Earn(snap.earn.product_id if snap.earn else product_id, "Available", rate,
                         0.0, self.s.earn_staked, orders,
-                        snap.earn.min_stake if snap.earn else 1.0)
+                        snap.earn.min_stake if snap.earn else 1.0,
+                        headline_apr=headline, tiered=bool(tiers))
         errors = {k: v for k, v in snap.errors.items()
                   if not (k.startswith("positions:") or k in ("account", "orders", "earn"))}
         if earn is None:
@@ -126,8 +136,10 @@ class PaperExchange:
                        open_orders=(), earn=earn, errors=MappingProxyType(errors))
 
     # ---- between cycles --------------------------------------------------------------
-    def accrue(self, snap: Snapshot, apr: Optional[float]) -> List[Dict]:
-        """Funding of the settlements passed and Earn interest since last_ms."""
+    def accrue(self, snap: Snapshot, apr: Optional[float], tiers=None) -> List[Dict]:
+        """Funding of the settlements passed and Earn interest since last_ms
+        (at the tiers' rate on the staked amount when the product has tiers)."""
+        apr = self.rate(apr, tiers)
         events: List[Dict] = []
         last, now = self.s.last_ms, snap.taken_ms
         if last is not None and now > last:

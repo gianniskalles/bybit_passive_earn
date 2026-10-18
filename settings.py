@@ -119,7 +119,11 @@ def carry_adopt_file() -> Path:
     return _path("YIELD_CARRY_ADOPT_FILE", carry_state_dir() / "carry_adopt_request.json")
 
 
-def carry_book_file() -> Path:
+def carry_book_file(paper: bool = False) -> Path:
+    """The live book; paper=True the DRY_RUN book (18/10: paper and live
+    never share a book)."""
+    if paper:
+        return _path("YIELD_CARRY_PAPER_BOOK_FILE", carry_state_dir() / "carry_paper_book.json")
     return _path("YIELD_CARRY_BOOK_FILE", carry_state_dir() / "carry_book.json")
 
 

@@ -41,6 +41,16 @@ no entry happened (the report says why).
 
 Run it with --property=TimeoutStopSec=600 (as below), so that a stop leaves
 time for the exit cycles before systemd would kill it.
+
+The second run (after the audit of 18/10) checks the fixes: the report's
+"verify" section counts the cycles whose position could not be read (0
+expected), shows the Earn APR the cycles used (the tier on the amount
+staked), the book's ETH dust before and after, and the ledger's net next to
+the change of the wallet (UTA + Earn + the ETH kept, at the last spot sell).
+Before the entry, ETH in the wallet under the spot minimum while the book is
+FLAT with no dust is the fee remainder of the previous round trip (17-18/10:
+0.00000998 ETH): it is put in the book as dust_qty, so this entry buys that
+much less and its exit sells it with the rest.
 """
 
 from __future__ import annotations
@@ -54,6 +64,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -116,7 +127,7 @@ def roundtrip_cfg(base: Dict, notional: float) -> Dict:
     cfg.update(FORCED_ENTRY)
     cfg.update(SYMBOLS=[SYMBOL], DRY_RUN=False, TOTAL_CAPITAL_CAP_USD=MAX_NOTIONAL_USD,
                USDT_BUFFER_USD=BUFFER_USD, MAX_NOTIONAL_PER_SYMBOL_USD=round(notional, 2),
-               CALIBRATION_SOURCE="supervised mainnet round trip (17/10) — NOT a calibration")
+               CALIBRATION_SOURCE="supervised mainnet round trip — NOT a calibration")
     cfg.pop("TESTNET_ONLY", None)
     return cfg
 
@@ -177,6 +188,7 @@ class Roundtrip:
         self.report: Dict = {}
         self.report_file: Optional[str] = None
         self.yaml_sha = _sha(settings.carry_config_file())
+        self.verify: Dict = {"position_unreadable_cycles": 0, "earn": None}
 
     # ---- checks -----------------------------------------------------------------------
     def _snap(self, now: int):
@@ -277,8 +289,36 @@ class Roundtrip:
         if self.notifier is not None:
             self.notifier.event(f"🧪 CARRY ROUNDTRIP: {text}")
 
+    def adopt_dust(self) -> Optional[float]:
+        """The previous round trip's fee remainder into the book (see the
+        module doc). Only under the spot minimum, only with a FLAT book that
+        has no dust and no unknown order: anything more is not dust."""
+        snap = self._snap(self.now_ms())
+        acct, m = snap.account, snap.markets.get(SYMBOL)
+        if acct is None or m is None:
+            return None
+        bal = acct.balance(SYMBOL[:-len("USDT")]).wallet
+        book, alert = book_store.load(settings.carry_book_file(), self.key)
+        sb = book.get(SYMBOL, SymbolBook())
+        if alert or sb.status != FLAT or sb.dust_qty or sb.pending_spot or sb.spot_qty \
+                or not 0 < bal < m.spot.min_qty:
+            return None
+        book[SYMBOL] = replace(sb, dust_qty=bal)
+        book_store.save(settings.carry_book_file(), self.key, book, self.now_ms())
+        self._event(f"ETH {bal} under the spot minimum put in the book as dust (the fee "
+                    f"remainder of the previous round trip)")
+        return bal
+
     def run(self) -> int:
         started = self.now_ms()
+        if not self.finish:
+            try:
+                self.verify["dust_adopted"] = self.adopt_dust()
+            except Exception as e:                                  # noqa: BLE001
+                print(f"[roundtrip] dust not adopted: {type(e).__name__}: {e}", file=sys.stderr)
+                self.verify["dust_adopted"] = None
+        self.verify["dust_before"] = self._book().dust_qty
+        self.verify["wallet_before"] = self._wallet()
         self._to(self.phase, "start")
         self._event(f"started ({self.phase}); hard limit {MAX_NOTIONAL_USD} USDT")
         quiet = 0
@@ -338,6 +378,10 @@ class Roundtrip:
                                 exchange=self.exchange, sleep=self._sleep,
                                 roundtrip=True, force_state=FORCE[self.phase])
         self.cycles += 1
+        if f"positions:{SYMBOL}" in (rec.get("snapshot_errors") or {}):
+            self.verify["position_unreadable_cycles"] += 1
+        if rec.get("earn"):
+            self.verify["earn"] = rec["earn"]
         self.heartbeat()
         if rc == 3:
             self._event("CONFIG_INCOMPLETE: " + "; ".join(rec.get("alerts", [])))
@@ -398,9 +442,32 @@ class Roundtrip:
         fast = self.phase == "exit" or bool(self.stop_reason and self.phase != "return")
         return quiet, rc_final, fast, False
 
+    def _wallet(self) -> Optional[Dict[str, float]]:
+        """USDT in the UTA, USDT in Earn, ETH in the wallet, the spot bid."""
+        try:
+            snap = self._snap(self.now_ms())
+            return {"usdt": snap.account.balance("USDT").wallet, "earn": snap.earn.staked,
+                    "eth": snap.account.balance("ETH").wallet,
+                    "spot_bid": snap.markets[SYMBOL].spot_bid}
+        except Exception as e:                                      # noqa: BLE001
+            print(f"[roundtrip] wallet unreadable: {type(e).__name__}: {e}", file=sys.stderr)
+            return None
+
     def _finish(self, rc: int, sb: SymbolBook) -> int:
         log_dir = Path(self.base["LOG_DIR"])
-        rows = ledger.read(log_dir, since_ms=self.timeline[0][1] if self.timeline else 0)
+        rows = ledger.read(ledger.home(log_dir, False),
+                           since_ms=self.timeline[0][1] if self.timeline else 0)
+        summary = ledger.summary(rows)
+        before, after = self.verify.get("wallet_before"), self._wallet()
+        self.verify.update(dust_after=sb.dust_qty, wallet_after=after)
+        sells = [r for r in rows if r.get("type") == "order" and r.get("leg") == "spot"
+                 and r.get("side") == "Sell" and r.get("filled")]
+        if before and after:
+            px = float(sells[-1]["avg_price"]) if sells else after["spot_bid"]
+            change = (after["usdt"] - before["usdt"]) + (after["earn"] - before["earn"]) + \
+                (after["eth"] - before["eth"]) * px
+            self.verify.update(wallet_change=change, ledger_net=summary["net"],
+                               ledger_minus_wallet=summary["net"] - change)
         self.report = {
             "result": {0: "done", 3: "config error", 4: "POSITION STILL OPEN",
                        5: "no entry (FLAT)"}.get(rc, str(rc)),
@@ -409,7 +476,8 @@ class Roundtrip:
             "book": sb.__dict__, "orders": [r for r in rows if r.get("type") == "order"],
             "funding": [r for r in rows if r.get("type") == "funding"],
             "round_trip": [r for r in rows if r.get("type") == "round_trip"],
-            "summary": ledger.summary(rows),
+            "summary": summary,
+            "verify": self.verify,
             "carry_yaml_unchanged": _sha(settings.carry_config_file()) == self.yaml_sha,
             "raw_responses": str(log_dir / "raw"),
         }

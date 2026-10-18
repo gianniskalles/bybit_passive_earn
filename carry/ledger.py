@@ -1,7 +1,8 @@
 """carry/ledger.py — the carry ledger (CARRY_PLAN §6, Phase 5).
 
-Append-only JSONL, one file per UTC day under <LOG_DIR>/ledger/. Every row
-has a type:
+Append-only JSONL, one file per UTC day under <LOG_DIR>/ledger/ for the live
+carry and <LOG_DIR>/paper/ledger/ for DRY_RUN (home()): paper and live never
+share a ledger. Every row has a type:
   order          one order of execute.py: fill, average price, reference
                  price and slippage, fee (and its coin when Bybit says)
   funding        a settlement while short (paper: computed; live: the
@@ -10,6 +11,7 @@ has a type:
                  settlement (rate x qty x mark) — R36's yardstick
   earn_interest  Easy Earn interest on the staked USDT (paper)
   round_trip     a position closed: basis + price PnL of both legs, fees
+                 apart; the coin kept (fee remainder) valued, not lost
 summary() adds them up over any window.
 """
 
@@ -21,6 +23,41 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional
 
 DAY_MS = 86_400_000
+PAPER_DIR = "paper"
+
+
+def home(log_dir: Path, dry_run: bool) -> Path:
+    """The directory whose ledger/ this mode reads and writes."""
+    return Path(log_dir) / PAPER_DIR if dry_run else Path(log_dir)
+
+
+def split_legacy_paper(log_dir: Path) -> int:
+    """Before 18/10 the DRY_RUN cycle wrote into the live ledger. Its only
+    rows there are earn_interest (the live carry never writes that type: the
+    real Earn interest is not booked). Moves them to the paper ledger, file
+    by file; idempotent. Returns the number of rows moved."""
+    moved = 0
+    for path in sorted((Path(log_dir) / "ledger").glob("carry_ledger_*.jsonl")):
+        keep, paper = [], []
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                keep.append(line)
+                continue
+            (paper if isinstance(row, dict) and row.get("type") == "earn_interest"
+             else keep).append(line)
+        if not paper:
+            continue
+        dest = home(log_dir, True) / "ledger" / path.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("a") as f:
+            f.write("\n".join(paper) + "\n")
+        tmp = path.with_suffix(".jsonl.tmp")
+        tmp.write_text("".join(line + "\n" for line in keep))
+        tmp.replace(path)
+        moved += len(paper)
+    return moved
 
 
 def _file(log_dir: Path, ts_ms: int) -> Path:
@@ -101,11 +138,26 @@ def summary(rows: Iterable[Mapping]) -> Dict[str, float]:
     return s
 
 
+def _coin_fee(row: Mapping) -> float:
+    """The part of an order's fee taken in the traded coin (a spot buy, R22)."""
+    detail = row.get("fee_detail")
+    if isinstance(detail, dict) and detail and "USDT" not in detail:
+        return float(row.get("fee") or 0.0)
+    return 0.0
+
+
 def round_trip(symbol: str, rows: Iterable[Mapping], closed_ms: int) -> Optional[Dict]:
     """The PnL of the legs of the position just closed: every filled order of
     the symbol since its last ENTER, as signed cash flows (spot buy -, spot
     sell +, perp sell +, perp buy -). Delta-neutral, so this is the basis
-    and execution PnL; fees are reported apart."""
+    and execution PnL; fees are reported apart (and only there).
+
+    Audit of 18/10: a fee taken in the coin is part of the coin paid for, so
+    the cash flow already holds it — it is added back here, `fees` counts it.
+    The coin bought and not sold (the fee remainder under the spot minimum,
+    book dust_qty) is still held: it is valued at the last spot price of the
+    round trip, not counted as spent. Dust from an earlier round trip sold in
+    this one comes out the same way (kept_qty < 0)."""
     orders = [r for r in rows if r.get("type") == "order" and r.get("symbol") == symbol
               and float(r.get("filled") or 0.0) > 0]
     starts = [i for i, r in enumerate(orders) if r.get("action") == "ENTER"
@@ -113,9 +165,20 @@ def round_trip(symbol: str, rows: Iterable[Mapping], closed_ms: int) -> Optional
     if not starts:
         return None
     legs = orders[starts[-1]:]
-    cash = 0.0
+    cash = kept = coin_fee_usdt = 0.0
+    price = None
     for r in legs:
-        v = float(r["filled"]) * float(r.get("avg_price") or 0.0)
+        filled, avg = float(r["filled"]), float(r.get("avg_price") or 0.0)
+        v = filled * avg
         cash += v if r.get("side") == "Sell" else -v
-    return {"type": "round_trip", "symbol": symbol, "ts_ms": closed_ms, "pnl": cash,
-            "fees": sum(fee_usdt(r) for r in legs), "orders": len(legs)}
+        if r.get("category") == "spot" or r.get("leg") == "spot":
+            fee_coin = _coin_fee(r)
+            kept += (filled if r.get("side") == "Buy" else -filled) - fee_coin
+            coin_fee_usdt += fee_coin * avg
+            price = avg
+    kept = round(kept, 12)
+    kept_value = kept * price if price else 0.0
+    return {"type": "round_trip", "symbol": symbol, "ts_ms": closed_ms,
+            "pnl": cash + coin_fee_usdt + kept_value,
+            "fees": sum(fee_usdt(r) for r in legs), "orders": len(legs),
+            "kept_qty": kept, "kept_value": kept_value}

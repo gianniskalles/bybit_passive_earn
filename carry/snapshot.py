@@ -246,6 +246,10 @@ class Earn:
     staked: float                     # USDT in the flexible product
     orders: Tuple[EarnOrder, ...]
     min_stake: Optional[float] = None
+    # A tiered product (hasTieredApr): `apr` is the rate of the tiers at the
+    # amount staked; headline_apr is Bybit's estimateApr (the top tier).
+    headline_apr: Optional[float] = None
+    tiered: bool = False
 
     def order(self, order_link_id: str) -> Optional[EarnOrder]:
         for o in self.orders:
@@ -332,17 +336,25 @@ def market_staleness(m: Market, now_ms: int) -> Optional[str]:
     return None
 
 
+def placeholder_row(r: Mapping) -> bool:
+    """Bybit's empty one-way row: seq -1, size 0, no avgPrice (17/10, next
+    to the real row when a position is open and on its own when flat)."""
+    return str(r.get("seq")).strip() == "-1" and str(r.get("size")).strip() == "0" \
+        and _empty(r, "avgPrice")
+
+
 def read_position(client, symbol: str) -> PerpPosition:
-    """One-way mode only. Hedge mode = a row with positionIdx 1 or 2. Several
-    positionIdx 0 rows (Bybit returns an empty placeholder row with seq -1
-    next to the real one, 17/10) are FLAT when every size is 0; several rows
-    with a size are unreadable."""
+    """One-way mode only. Hedge mode = a row with positionIdx 1 or 2 (any
+    row). The placeholder row (placeholder_row) is always ignored: one real
+    row next to it is read as that row (the hold of 17-18/10). Several real
+    rows are FLAT when every size is 0; several with a size are unreadable."""
     rows = [r for r in client.get_positions(symbol) if r.get("symbol") == symbol]
     where = f"position {symbol}"
-    if not rows:
-        return PerpPosition(symbol, "", 0.0, None, None, 0)
     if any(str(r.get("positionIdx", 0)) != "0" for r in rows):
         raise Unreadable(f"{where}: hedge-mode rows {rows!r}; one-way mode is required")
+    rows = [r for r in rows if not placeholder_row(r)]
+    if not rows:
+        return PerpPosition(symbol, "", 0.0, None, None, 0)
     sizes = [_f(r, "size", where) for r in rows]
     if any(sz < 0 for sz in sizes):
         raise Unreadable(f"{where}: negative size in {rows!r}")
@@ -447,9 +459,53 @@ def read_earn(client, coin: str) -> Earn:
         orders.append(EarnOrder(_s(o, "orderId", wo), str(o.get("orderLinkId") or ""),
                                 _s(o, "orderType", wo), _s(o, "status", wo),
                                 _opt_f(o, "orderValue"), int(created) if created else None))
-    return Earn(pid, _s(p, "status", where), _pct(p.get("estimateApr"), where),
+    headline = _pct(p.get("estimateApr"), where)
+    tiered = _tiered(p, where)
+    apr = headline if tiered is None else tier_apr(tiered, staked)
+    return Earn(pid, _s(p, "status", where), apr,
                 _opt_f(p, "redeemProcessingMinute"), staked, tuple(orders),
-                _opt_f(p, "minStakeAmount"))
+                _opt_f(p, "minStakeAmount"), headline_apr=headline, tiered=tiered is not None)
+
+
+Tier = Tuple[float, float, float]           # (min, max or inf, apr)
+
+
+def _tiered(p: Mapping, where: str) -> Optional[Tuple[Tier, ...]]:
+    """The APR tiers of a product with hasTieredApr, None for a flat rate.
+    Tiers that cannot be read make the product unreadable (no layer A rate,
+    no entry): the headline estimateApr is only the top tier (17/10: 1.94 %
+    while the first 100 USDT earned 6.94 %)."""
+    if p.get("hasTieredApr") is not True:
+        return None
+    raw = p.get("tierAprDetails")
+    if not isinstance(raw, list) or not raw:
+        raise Unreadable(f"{where}: hasTieredApr without tierAprDetails")
+    tiers = []
+    for t in raw:
+        lo = _f(t, "min", f"{where} tier")
+        hi = _f(t, "max", f"{where} tier")
+        tiers.append((lo, float("inf") if hi < 0 else hi, _pct(t.get("estimateApr"),
+                                                               f"{where} tier")))
+    tiers.sort()
+    if tiers[0][0] != 0 or any(a[1] != b[0] for a, b in zip(tiers, tiers[1:])) \
+            or tiers[-1][1] != float("inf") or any(hi <= lo for lo, hi, _ in tiers):
+        raise Unreadable(f"{where}: tiers {raw!r} do not cover 0..inf without gaps")
+    return tuple(tiers)
+
+
+def tier_apr(tiers: Tuple[Tier, ...], amount: float) -> float:
+    """The APR the tiers pay on `amount` as a whole (each tier on its part).
+    Nothing staked: the rate of the first USDT."""
+    if amount <= 0:
+        return tiers[0][2]
+    paid = sum(max(0.0, min(amount, hi) - lo) * apr for lo, hi, apr in tiers)
+    return paid / amount
+
+
+def tiers_of(product: Mapping) -> Optional[Tuple[Tier, ...]]:
+    """_tiered for a raw product row read elsewhere (the paper account's
+    public Earn data); None for a flat rate. Raises Unreadable."""
+    return _tiered(product, "earn product")
 
 
 def take(client, cfg: Mapping, now_ms: Optional[int] = None, private: bool = True) -> Snapshot:

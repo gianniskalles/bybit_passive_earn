@@ -7,7 +7,8 @@ One cycle:
   2. carry risk state (own signed file); staleness/invalid only ever makes it
      more conservative. The hold latch (risk.py) adds NO_NEW_POSITIONS until
      the operator writes the carry risk state after it.
-  3. the book (signed; unreadable -> empty + CRITICAL -> BOOK_MISMATCH)
+  3. the book (signed; unreadable -> empty + CRITICAL -> BOOK_MISMATCH).
+     DRY_RUN and live keep separate books and ledgers (18/10).
   4. exchange: DRY_RUN -> PaperExchange (real market data, simulated account,
      accrued funding and Earn interest); live -> LiveExchange, after
      resolve_pending() settles spot orders of unknown fate
@@ -83,6 +84,20 @@ def public_apr(client) -> Tuple[Optional[str], Optional[float], Optional[str]]:
         return pid, apr, None
     except (BybitAPIError, ValueError, KeyError, TypeError) as e:
         return None, None, f"{type(e).__name__}: {e}"
+
+
+def public_tiers(client) -> Tuple[Optional[tuple], Optional[str]]:
+    """(APR tiers of the USDT Flexible product or None for a flat rate,
+    error) — the paper account pays itself what the tiers pay on its amount,
+    as the live Earn does (audit of 18/10)."""
+    get = getattr(client, "get_earn_products", None)
+    if get is None:
+        return None, None
+    try:
+        products = [p for p in get(coin="USDT") if str(p.get("coin") or "").upper() == "USDT"]
+        return (snapshot_mod.tiers_of(products[0]) if products else None), None
+    except snapshot_mod.PARSE_ERRORS as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def realized_funding_live(client, last_ms: Optional[int], now_ms: int) -> List[Dict]:
@@ -213,7 +228,8 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
     rec["risk_state"] = state
 
     # ---- book ------------------------------------------------------------------------
-    book, book_alert = book_store.load(settings.carry_book_file(), key)
+    book_file = settings.carry_book_file(paper=dry)
+    book, book_alert = book_store.load(book_file, key)
     if book_alert:
         alerts.append(book_alert)
     cycle_state = _read_json(settings.carry_cycle_file())
@@ -226,10 +242,14 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
                                    initial_usdt=paper_start[0], initial_earn=paper_start[1])
         raw = snapshot_fn(client, cfg, now_ms=now, private=False)
         pid, apr, apr_err = public_apr(client)
+        tiers, tier_err = public_tiers(client)
         if apr_err:
             alerts.append(f"LAYER_A_UNREADABLE: {apr_err}")
-        events.extend(paper.accrue(raw, apr))
-        snap = paper.overlay(raw, apr, pid or "paper")
+        if tier_err:
+            alerts.append(f"LAYER_A_UNREADABLE: tiers: {tier_err}")
+            apr = None                    # a tiered rate that cannot be read is unknown
+        events.extend(paper.accrue(raw, apr, tiers))
+        snap = paper.overlay(raw, apr, pid or "paper", tiers)
         venue = paper
     else:
         venue = exchange or ex.LiveExchange(client, dry_run=False)
@@ -252,6 +272,9 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
                         for s, d in plan.decisions.items()}
     rec["no_entry"] = {s: list(w) for s, w in plan.no_entry.items()}
     rec["funding"] = funding_view(plan.decisions, snap, cfg)
+    if snap.earn is not None:
+        rec["earn"] = {"apr": snap.earn.apr, "headline_apr": snap.earn.headline_apr,
+                       "tiered": snap.earn.tiered, "staked": snap.earn.staked}
     rec["actions"] = [a.__dict__ for a in plan.actions]
     result = ex.execute_plan(plan, snap, cfg, state, book, cycle_id, venue, clock=clock,
                              sleep=sleep)
@@ -266,16 +289,21 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
 
     # ---- ledger, R36, escalations ---------------------------------------------------------
     events.extend(ledger.order_events(result.orders))
-    history = ledger.read(log_dir, since_ms=now - LEDGER_LOOKBACK_MS) + events
+    led_dir = ledger.home(log_dir, dry)
+    moved = ledger.split_legacy_paper(log_dir)
+    if moved:
+        alerts.append(f"LEDGER_SPLIT: {moved} DRY_RUN row(s) moved from the live ledger to "
+                      f"{ledger.home(log_dir, True) / 'ledger'}")
+    history = ledger.read(led_dir, since_ms=now - LEDGER_LOOKBACK_MS) + events
     for sym, sb in book.items():
         prev = before.get(sym)
         if prev is not None and prev.status == OPEN and sb.status == FLAT:
             opened = prev.entered_ms or (prev.entry_times[-1] if prev.entry_times else now)
-            legs = ledger.read(log_dir, since_ms=min(opened, now - LEDGER_LOOKBACK_MS)) + events
+            legs = ledger.read(led_dir, since_ms=min(opened, now - LEDGER_LOOKBACK_MS)) + events
             rt = ledger.round_trip(sym, legs, now)
             if rt:
                 events.append(rt)
-    ledger.write(log_dir, events, now, cycle_id)
+    ledger.write(led_dir, events, now, cycle_id)
     under = risk.underperformance(history, cfg, now)
     if under:
         alerts.append(under)
@@ -286,7 +314,7 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
         risk.write_hold(hold_file, "; ".join(reasons), now)
 
     # ---- persist -------------------------------------------------------------------------
-    book_store.save(settings.carry_book_file(), key, book, now)
+    book_store.save(book_file, key, book, now)
     if dry:
         paper.save(settings.carry_paper_file())
         rec["paper"] = {"usdt": paper.s.usdt, "earn_staked": paper.s.earn_staked,
@@ -317,6 +345,17 @@ def notify_cycle(rec: Dict, notifier) -> None:
                      f"🚨 {name} {rec.get('cycle_id')}: {', '.join(blocking)}. "
                      f"Alerts: {'; '.join(rec.get('alerts', []))[:1500]}",
                      resolved_text=f"✅ {name}: no blocking codes any more")
+    # A position that cannot be read with the book OPEN: its own channel, so
+    # it is sent at once even while another CRITICAL is already announced,
+    # and again when the controlled exit starts (no 2-cycle filter).
+    unread = [a for a in rec.get("alerts", []) if a.startswith("CRITICAL: POSITION_UNREADABLE:")]
+    syms = sorted({a.split(":", 3)[2].split()[0] for a in unread})
+    exiting = any("controlled exit" in a for a in unread)
+    notifier.observe("carry_position",
+                     (f"POSITION_UNREADABLE {','.join(syms)}" + (" EXIT" if exiting else ""))
+                     if unread else None,
+                     f"🚨 {name} CRITICAL {rec.get('cycle_id')}: " + "; ".join(unread)[:1500],
+                     resolved_text=f"✅ {name}: the position is readable again (or closed)")
     state = rec.get("risk_state")
     notifier.observe("carry_risk_state", None if state == "NORMAL" else state,
                      f"⚠️ {name} RISK STATE {state}: no new positions",
