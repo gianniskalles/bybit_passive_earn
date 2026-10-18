@@ -560,4 +560,20 @@ tests `tests/test_carry_mainnet_roundtrip_20261017.py`, κλειδωμένα σ�
     - **Paper και live χωριστά.** Book `carry_paper_book.json` και ledger
       `<LOG_DIR>/paper/ledger/` για το DRY_RUN· οι παλιές γραμμές paper
       (`earn_interest`) φεύγουν από το live ledger αυτόματα (`LEDGER_SPLIT`).
+22. **18/10 — η μετάβαση σε live.** Το `config/carry.yaml` μένει για πάντα
+    `DRY_RUN: true`, και το `deploy.sh` αρνείται οτιδήποτε άλλο.
+    - **Live:** ο υπογεγραμμένος διακόπτης `state/carry_live.json`
+      (`carry/live.py`). Τον γράφει μόνο το `scripts/carry_live.py enable`:
+      - με τερματικό, κωδικό μίας χρήσης στο Telegram του Giannis και την
+        ακριβή φράση `LIVE <cap> USDT`·
+      - με όλους τους ελέγχους να περνούν: FLAT, NORMAL, Cross Margin,
+        collateral, DEADMAN_URL, πλήρης validation του live config.
+    - **Όριο κεφαλαίου:** υπογράφεται στον διακόπτη και δεν ανεβαίνει ποτέ
+      από το repo.
+    - **Disable:** μόνο όταν το carry είναι FLAT.
+    - **deploy.sh και roundtrip:** αρνούνται όσο υπάρχει ο διακόπτης.
+    - **Χωρίς έγκυρο διακόπτη με ανοιχτή live θέση:** live μόνο UNWIND, ως
+      FLAT.
+    - **`DEADMAN_URL`:** μόνο στο `/opt/hermes/.env`, ποτέ στο repo (null
+      εκεί, με test).
 

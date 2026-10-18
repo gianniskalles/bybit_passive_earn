@@ -127,6 +127,11 @@ def carry_book_file(paper: bool = False) -> Path:
     return _path("YIELD_CARRY_BOOK_FILE", carry_state_dir() / "carry_book.json")
 
 
+def carry_live_file() -> Path:
+    """The live switch (carry/live.py); written only by scripts/carry_live.py."""
+    return _path("YIELD_CARRY_LIVE_FILE", carry_state_dir() / "carry_live.json")
+
+
 def carry_paper_file() -> Path:
     return _path("YIELD_CARRY_PAPER_FILE", carry_state_dir() / "carry_paper.json")
 

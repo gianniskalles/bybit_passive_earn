@@ -64,4 +64,4 @@ MMR_EMERGENCY: 0.60
 ADL_RANK_REDUCE: 4
 CVR_DROP_ALERT: 0.05
 UNDERPERFORMANCE_RATIO: 0.5
-DEADMAN_URL: null                      # external liveness check (R33); set before live (13.9)
+DEADMAN_URL: null                      # always null here: the URL goes in /opt/hermes/.env (18/10)

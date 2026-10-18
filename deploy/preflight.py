@@ -195,6 +195,12 @@ def cmd_keys(args: List[str]) -> int:
         if prof.get(CARRY_KEY) and prof[CARRY_KEY] == yield_key:
             errors.append(f"{CARRY_KEY} is the yield rotation's BYBIT_API_KEY: the carry needs "
                           f"its own subaccount and key (two systems never share an account)")
+        dm = prof.get("DEADMAN_URL")
+        rows.append(("DEADMAN_URL", "OK (from the .env; never in the repo)" if dm else
+                     ("not set (needed only for live)" if dry else "MISSING"),
+                     fingerprint(dm) if dm else "-"))
+        if dm and not dm.startswith("https://"):
+            errors.append("DEADMAN_URL in the .env must be an https:// URL")
         tk = prof.get(TESTNET_KEY)
         rows.append((TESTNET_KEY, "set (testnet only; deploy never uses it)" if tk else "not set",
                      fingerprint(tk) if tk else "-"))
@@ -378,6 +384,12 @@ def cmd_carry_dry_run_on(args: List[str]) -> int:
         return 1
     value = cfg.get("DRY_RUN") if isinstance(cfg, dict) else None
     print(f"{path}: DRY_RUN = {value!r}")
+    switch = settings.carry_live_file()
+    if switch.exists():
+        print(f"ERROR: the live switch {switch} exists: the carry runs with real money and "
+              f"deploy never runs or restarts it. Only Giannis turns it off "
+              f"(scripts/carry_live.py disable, once the carry is FLAT).")
+        return 1
     if value is True:
         return 0
     print("ERROR: DRY_RUN must be the boolean true. deploy.sh never runs the carry with anything "

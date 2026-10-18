@@ -448,3 +448,94 @@ Paper και live έχουν πλέον χωριστό book (`carry_paper_book.j
 (`/opt/hermes/logs/carry/paper/ledger/`). Στον πρώτο κύκλο DRY_RUN μετά το
 deploy, οι παλιές γραμμές paper φεύγουν από το live ledger μία φορά
 (`LEDGER_SPLIT`, όχι blocking).
+
+## Carry — μετάβαση σε live (μόνο ο Giannis)
+
+Το `config/carry.yaml` μένει **για πάντα** `DRY_RUN: true` (ένα test το
+κλειδώνει), και το `deploy.sh` αρνείται οτιδήποτε άλλο.
+
+**Ο διακόπτης.** Live σημαίνει ένα υπογεγραμμένο αρχείο εκτός repo,
+`/opt/hermes/state/carry_live.json`. Το γράφει μόνο το
+`scripts/carry_live.py enable`, και μόνο:
+- σε τερματικό (όχι pipe, όχι agent)·
+- με κωδικό μίας χρήσης που έρχεται στο Telegram του Giannis·
+- με την ακριβή φράση `LIVE <cap> USDT`.
+
+**Το όριο κεφαλαίου.** Υπογράφεται μέσα στον διακόπτη. Μια μεταγενέστερη
+αλλαγή του `TOTAL_CAPITAL_CAP_USD` στο repo δεν το ανεβάζει ποτέ.
+
+**Ο διακόπτης και το deploy.** Όσο υπάρχει ο διακόπτης, το `deploy.sh`
+αρνείται να τρέξει (βήμα 1): ο χειροκίνητος κύκλος του θα έκανε live
+συναλλαγές.
+
+| Περίπτωση | Τι κάνει ο κύκλος |
+|---|---|
+| Χωρίς διακόπτη | paper, όπως πριν |
+| Έγκυρος διακόπτης | live |
+| Διακόπτης που δεν επαληθεύεται (χαλασμένος, άλλο κλειδί) | ποτέ live, και CRITICAL |
+| Χαμένος ή χαλασμένος διακόπτης με ανοιχτή live θέση | live **μόνο UNWIND** ως FLAT, και CRITICAL |
+
+Το τελευταίο υπάρχει για να μη μείνει ποτέ πραγματική θέση χωρίς διαχείριση.
+
+**DEADMAN_URL:** μόνο στο `/opt/hermes/.env`, ποτέ στο repo. Χωρίς αυτό ένας
+κύκλος live δεν τρέχει καθόλου (`CONFIG_INCOMPLETE`). Αν μπει νωρίτερα, το
+pingάρουν και οι κύκλοι paper: έτσι ελέγχεται πριν το live.
+
+### Hermes (πριν το live)
+
+```bash
+PY=/opt/hermes/venvs/yield_rotation/bin/python REPO=/opt/hermes/yield_rotation
+cd $REPO && sudo -u hermes git pull --ff-only origin main
+sudo $REPO/deploy/deploy.sh --system carry      # paper, όπως πάντα
+# μετά που ο Giannis έβαλε το DEADMAN_URL στο .env:
+sudo -u hermes env HOME=/opt/hermes $PY $REPO/deploy/preflight.py keys --system carry
+#   DEADMAN_URL: OK (from the .env; never in the repo)  sha256:...
+journalctl -u yield-carry-cycle --since -15min --no-pager | tail -n 5
+sudo -u hermes env HOME=/opt/hermes $PY $REPO/scripts/carry_live.py status
+#   paper (DRY_RUN): no live switch ...   carry exposure: FLAT
+```
+
+Ο Hermes **δεν** τρέχει ποτέ `carry_live.py enable` ή `disable`.
+
+### Giannis
+
+1. **healthchecks.io:**
+   - νέο check «carry», period 5 λεπτά, grace 15 λεπτά·
+   - ειδοποίηση στο email ή στο Telegram σου·
+   - αντιγράφεις το ping URL.
+2. **`.env`** (`sudoedit /opt/hermes/.env`): προσθέτεις
+   `DEADMAN_URL=https://hc-ping.com/...`. Μετά από 1–2 κύκλους paper, το check
+   στο healthchecks.io γίνεται πράσινο.
+3. **Bybit UI**, όπως στους επιβλεπόμενους κύκλους:
+   - Cross Margin·
+   - ETH collateral On·
+   - το Earn του subaccount όπως το θέλεις (βλ. το όριο των 100 USDT πιο κάτω).
+4. **Ενεργοποίηση, σε δικό σου τερματικό** (ssh):
+   ```bash
+   sudo -u hermes env HOME=/opt/hermes /opt/hermes/venvs/yield_rotation/bin/python \
+       /opt/hermes/yield_rotation/scripts/carry_live.py enable --capital-cap 100
+   ```
+   Τυπώνει τους ελέγχους. Αν κάτι λείπει, αρνείται και λέει τι.
+
+   Αν περάσουν, στέλνει κωδικό στο Telegram σου. Τον πληκτρολογείς, μετά τη
+   φράση `LIVE 100 USDT`.
+
+   Ο επόμενος κύκλος κάνει live συναλλαγές· στο Telegram έρχεται
+   «🟢 CARRY LIVE enabled».
+5. **Σταμάτημα:**
+   - Telegram `/unwind carry`·
+   - περιμένεις FLAT·
+   - μετά `... carry_live.py disable`. Το disable αρνείται όσο υπάρχει θέση.
+
+   Για νέο deploy: disable → deploy → enable ξανά.
+
+**Όριο 100 USDT της κλίμακας του Earn.** Το APR του Earn είναι ο μέσος όρος
+των κλιμάκων στο ποσό: 6,94% ως 100 USDT, 1,94% πάνω από αυτά.
+
+Μια είσοδος όμως αποσύρει το **πάνω** κομμάτι του υπολοίπου. Πάνω από 100
+USDT, το κόστος ευκαιρίας της είναι το 1,94% και όχι ο μέσος όρος. Έτσι το
+carry μπαίνει δυσκολότερα απ' όσο θα έπρεπε. Αυτό είναι συντηρητικό, όχι
+επικίνδυνο.
+
+Με ≤ 100 USDT στο Earn του subaccount, μέσος όρος και πραγματικό κόστος
+συμπίπτουν (6,94%).
