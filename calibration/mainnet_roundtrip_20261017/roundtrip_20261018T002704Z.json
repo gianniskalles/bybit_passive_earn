@@ -1,0 +1,227 @@
+{
+  "result": "done",
+  "timeline": [
+    [
+      "enter",
+      "2026-10-17T19:30:39.149000+00:00"
+    ],
+    [
+      "hold",
+      "2026-10-17T19:35:59.060000+00:00"
+    ],
+    [
+      "exit",
+      "2026-10-18T00:10:59.611000+00:00"
+    ],
+    [
+      "return",
+      "2026-10-18T00:11:46.545000+00:00"
+    ],
+    [
+      "done",
+      "2026-10-18T00:27:04.354000+00:00"
+    ]
+  ],
+  "exit_reason": "one settlement passed",
+  "entry": {
+    "perp_qty": 0.01,
+    "min_notional": 24.1999032,
+    "usdt_needed": 29.93074027664,
+    "usdt_uta": 8.226e-05,
+    "usdt_earn": 57.2714,
+    "spot_qty": 0.01000998,
+    "limit_usdt": 24.700253904
+  },
+  "cycles": 60,
+  "book": {
+    "status": "FLAT",
+    "redeem_link": null,
+    "redeem_started_ms": null,
+    "redeem_amount": null,
+    "entered_ms": null,
+    "perp_qty": 0.0,
+    "spot_qty": 0.0,
+    "pending_spot": [],
+    "entry_times": [
+      1792265748811
+    ],
+    "collateral_ratio": 0.95
+  },
+  "orders": [
+    {
+      "action": "EARN_REDEEM_FOR_ENTRY",
+      "avg_price": null,
+      "category": "FlexibleSaving",
+      "cycle_id": "20261017_193039_364af2",
+      "error": null,
+      "fee": null,
+      "fee_detail": null,
+      "filled": 29.33,
+      "leg": "earn",
+      "logged_ms": 1792265439297,
+      "order_link_id": "cy-20261017_193039_364af2-R-ETHUSDT",
+      "order_type": "Redeem",
+      "outcome": "sent",
+      "qty": null,
+      "ref_price": null,
+      "side": null,
+      "slippage_bps": null,
+      "symbol": "ETHUSDT",
+      "ts_ms": 1792265439297,
+      "type": "order"
+    },
+    {
+      "action": "ENTER",
+      "avg_price": 2415.77,
+      "category": "linear",
+      "cycle_id": "20261017_193548_26d8d8",
+      "error": null,
+      "fee": 0.01328674,
+      "fee_detail": {
+        "USDT": "0.01328674"
+      },
+      "filled": 0.01,
+      "leg": "perp",
+      "logged_ms": 1792265748811,
+      "order_link_id": "cy-6f5bd81d074bccdad8bc264009e018d9f",
+      "order_type": "Limit",
+      "outcome": "done",
+      "qty": "0.01",
+      "ref_price": 2415.77,
+      "side": "Sell",
+      "slippage_bps": 0.0,
+      "symbol": "ETHUSDT",
+      "ts_ms": 1792265748811,
+      "type": "order"
+    },
+    {
+      "action": "ENTER",
+      "avg_price": 2416.96,
+      "category": "spot",
+      "cycle_id": "20261017_193548_26d8d8",
+      "error": null,
+      "fee": 1.002e-05,
+      "fee_detail": {
+        "ETH": "0.00001002"
+      },
+      "filled": 0.01002,
+      "leg": "spot",
+      "logged_ms": 1792265748811,
+      "order_link_id": "cy-f852664c114935966f204ad857011fcd6",
+      "order_type": "Limit",
+      "outcome": "done",
+      "qty": "0.01002",
+      "ref_price": 2416.96,
+      "side": "Buy",
+      "slippage_bps": -0.0,
+      "symbol": "ETHUSDT",
+      "ts_ms": 1792265748811,
+      "type": "order"
+    },
+    {
+      "action": "SELL",
+      "avg_price": 2398.69,
+      "category": "spot",
+      "cycle_id": "20261018_001129_0e7247",
+      "error": null,
+      "fee": 0.0239869,
+      "fee_detail": {
+        "USDT": "0.0239869"
+      },
+      "filled": 0.01,
+      "leg": "spot",
+      "logged_ms": 1792282289612,
+      "order_link_id": "cy-f04be0264730bc6f5be8a21a99711d8f3",
+      "order_type": "Limit",
+      "outcome": "done",
+      "qty": "0.01",
+      "ref_price": 2398.69,
+      "side": "Sell",
+      "slippage_bps": 0.0,
+      "symbol": "ETHUSDT",
+      "ts_ms": 1792282289612,
+      "type": "order"
+    },
+    {
+      "action": "CLOSE",
+      "avg_price": 2397.41,
+      "category": "linear",
+      "cycle_id": "20261018_001129_0e7247",
+      "error": null,
+      "fee": 0.01318576,
+      "fee_detail": {
+        "USDT": "0.01318576"
+      },
+      "filled": 0.01,
+      "leg": "perp",
+      "logged_ms": 1792282289612,
+      "order_link_id": "cy-8bc34daa6d1d3fb910df9854e77548428",
+      "order_type": "Market",
+      "outcome": "done",
+      "qty": "0.01",
+      "ref_price": 2397.41,
+      "side": "Buy",
+      "slippage_bps": -0.0,
+      "symbol": "ETHUSDT",
+      "ts_ms": 1792282289612,
+      "type": "order"
+    },
+    {
+      "action": "EARN_RETURN",
+      "avg_price": null,
+      "category": "FlexibleSaving",
+      "cycle_id": "20261018_001646_3a694c",
+      "error": null,
+      "fee": null,
+      "fee_detail": null,
+      "filled": 29.23,
+      "leg": "earn",
+      "logged_ms": 1792282606559,
+      "order_link_id": "cy-20261018_001646_3a694c-0E-USDT",
+      "order_type": "Stake",
+      "outcome": "sent",
+      "qty": null,
+      "ref_price": null,
+      "side": null,
+      "slippage_bps": null,
+      "symbol": null,
+      "ts_ms": 1792282606559,
+      "type": "order"
+    }
+  ],
+  "funding": [
+    {
+      "amount": 0.00047121,
+      "cycle_id": "20261018_000041_2f30ac",
+      "logged_ms": 1792281641854,
+      "source": "transaction_log",
+      "symbol": "ETHUSDT",
+      "ts_ms": 1792281600000,
+      "type": "funding"
+    }
+  ],
+  "round_trip": [
+    {
+      "cycle_id": "20261018_001129_0e7247",
+      "fees": 0.0746773392,
+      "logged_ms": 1792282289612,
+      "orders": 4,
+      "pnl": -0.04743919999999591,
+      "symbol": "ETHUSDT",
+      "ts_ms": 1792282289612,
+      "type": "round_trip"
+    }
+  ],
+  "summary": {
+    "funding": 0.00047121,
+    "expected_funding": 0.000470983986,
+    "earn_interest": 0.0,
+    "fees": 0.0746773392,
+    "basis_pnl": -0.04743919999999591,
+    "orders": 6,
+    "slippage_bps_max": 0.0,
+    "net": -0.1216453291999959
+  },
+  "carry_yaml_unchanged": true,
+  "raw_responses": "/opt/hermes/logs/carry/raw"
+}
