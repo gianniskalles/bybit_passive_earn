@@ -200,11 +200,14 @@ class _Run:
         self.updates[sym] = sb
 
     def settle(self, sym, sb: SymbolBook) -> None:
-        """Both legs gone -> FLAT, keeping what outlives a position."""
+        """Both legs gone -> FLAT, keeping what outlives a position (the dust
+        left under the spot minimum among it)."""
         m = self.snap.markets.get(sym)
         dust = m.spot.min_qty if m else 0.0
         if sb.perp_qty <= 0 and sb.spot_qty < dust and not sb.pending_spot:
-            sb = SymbolBook(entry_times=sb.entry_times, collateral_ratio=sb.collateral_ratio)
+            # What is left below the spot minimum stays ours (dust_qty).
+            sb = SymbolBook(entry_times=sb.entry_times, collateral_ratio=sb.collateral_ratio,
+                            dust_qty=add(sb.dust_qty, sb.spot_qty))
         self.put(sym, sb)
 
     def link(self, i: int, tag: str, sym: str, n: int) -> str:
@@ -334,11 +337,19 @@ class _Run:
         filled = out.filled
         if filled <= 0:
             return                                             # nothing filled: nothing to hedge
+        # The book's dust is ours and already in the wallet: it is part of the
+        # spot leg, so that much less is bought (never more than the wallet has).
+        acct = self.snap.account
+        own = sb.dust_qty if acct is None else min(sb.dust_qty, acct.balance(base).wallet)
+        own = min(own, filled)
         sb = replace(sb, status=OPEN, entered_ms=self.now, perp_qty=filled,
-                     entry_times=sb.entry_times + (self.now,), spot_qty=0.0)
+                     entry_times=sb.entry_times + (self.now,), spot_qty=own,
+                     dust_qty=sub(sb.dust_qty, own))
         self.put(sym, sb)
 
-        received, pending = self.buy_spot(i, sym, base, filled, fee, m, start + self.timeout)
+        bought, pending = self.buy_spot(i, sym, base, sub(filled, own), fee, m,
+                                        start + self.timeout)
+        received = add(own, bought)
         sb = replace(self.sb(sym), spot_qty=received,
                      pending_spot=self.sb(sym).pending_spot + tuple(pending))
         self.put(sym, sb)
@@ -348,7 +359,7 @@ class _Run:
             excess = sub(filled, target)
             closed, ok = self.close_perp(i, sym, "Buy", excess, m)
             sb = replace(self.sb(sym), perp_qty=sub(filled, closed))
-            if received <= 0 or pending:
+            if bought <= 0 or pending:
                 self.alerts.append(f"ORPHAN_LEG: {sym} perp {filled} filled, spot "
                                    f"{'unknown' if pending else 'not bought'}; perp closed "
                                    f"reduceOnly ({closed})")

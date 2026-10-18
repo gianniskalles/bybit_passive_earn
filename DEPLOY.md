@@ -415,3 +415,36 @@ sudo systemctl start yield-carry-cycle.timer yield-carry-heartbeat.timer \
 sudo tar czf /opt/hermes/carry_roundtrip_$(date -u +%Y%m%dT%H%M%SZ).tgz \
     /opt/hermes/logs/carry/roundtrip_*.json /opt/hermes/logs/carry/raw /opt/hermes/logs/carry/ledger
 ```
+
+### Δεύτερος επιβλεπόμενος κύκλος (μετά το audit της 18/10)
+
+Ίδιες εντολές με πάνω (`--check`, μετά «πάμε», μετά `--i-approve-real-money`).
+Το `DRY_RUN` του `carry.yaml` μένει `true`. Τι αλλάζει:
+- **Πριν την είσοδο:** τα 0,00000998 ETH του πρώτου κύκλου (κάτω από το
+  ελάχιστο spot) μπαίνουν στο book ως υπόλειμμα (μήνυμα στο Telegram). Η
+  αγορά spot είναι τόσο μικρότερη (0,01001 αντί 0,01002).
+- **Στο hold:** η θέση πρέπει να διαβάζεται σε κάθε κύκλο. Αν δεν διαβαστεί
+  → `CRITICAL: POSITION_UNREADABLE` αμέσως στο Telegram, και το script πάει
+  κατευθείαν στην έξοδο.
+- **Στο report** (`roundtrip_<utc>.json`, ενότητα `verify`), τι περιμένουμε:
+
+  | Πεδίο | Αναμενόμενο |
+  |---|---|
+  | `position_unreadable_cycles` | 0 |
+  | `earn.apr` | το APR της κλίμακας (~6,9% με < 100 USDT στο Earn), όχι 1,94% |
+  | `dust_adopted` / `dust_before` | 0,00000998 |
+  | `dust_after` | ένα νέο υπόλειμμα < 0,00001, και το ίδιο ποσό ETH στο wallet |
+  | `ledger_minus_wallet` | ~0: το ledger ίσο με την αλλαγή του wallet, εκτός από τον τόκο του Earn |
+
+Μετά, εκτός από τους timers, πακετάρισμα και των records:
+
+```bash
+sudo tar czf /opt/hermes/carry_roundtrip2_$(date -u +%Y%m%dT%H%M%SZ).tgz \
+    /opt/hermes/logs/carry/roundtrip_*.json /opt/hermes/logs/carry/raw \
+    /opt/hermes/logs/carry/ledger /opt/hermes/logs/carry/*.jsonl
+```
+
+Paper και live έχουν πλέον χωριστό book (`carry_paper_book.json`) και ledger
+(`/opt/hermes/logs/carry/paper/ledger/`). Στον πρώτο κύκλο DRY_RUN μετά το
+deploy, οι παλιές γραμμές paper φεύγουν από το live ledger μία φορά
+(`LEDGER_SPLIT`, όχι blocking).

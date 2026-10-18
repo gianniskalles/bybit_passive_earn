@@ -7,9 +7,10 @@ snapshot.take, served the recorded bodies in the order they were recorded.
 
 The audit itself: calibration/mainnet_roundtrip_20261017/AUDIT.md.
 
-Tests marked xfail(strict=True) are defects the audit found and did NOT fix
-(fixes wait for Giannis): they fail the suite the moment a fix lands, so the
-fix must turn them into ordinary tests.
+The defects the audit found were fixed after Giannis approved them (18/10;
+tests/test_carry_audit_fixes.py). What the RUN recorded stays as it was
+(the stored ledger rows and report, the cycle records); the same answers
+replayed through the fixed code read and book what the wallet shows.
 """
 
 import json
@@ -179,8 +180,9 @@ def test_the_spot_buy_gross_up_and_the_dust_it_leaves():
     assert wallet_at(T_HOLD)["ETH"] == pytest.approx(received, abs=1e-12) == 0.01000998
     assert floor_to(0.01000998, step) == 0.01 == SPOT_OUT["filled"]
     assert wallet_at(1792282608608)["ETH"] == 0.00000998 < min_qty
-    # A second round trip of the same size leaves the same again: above the
-    # minimum, beyond a FLAT book (AUDIT.md, finding 4).
+    # A second round trip of the same size would leave the same again, above
+    # the minimum (AUDIT.md, finding 4) — fixed: the remainder is the book's
+    # dust_qty, the next entry buys that much less (test_carry_audit_fixes).
     assert 2 * 0.00000998 > min_qty
 
 
@@ -315,10 +317,12 @@ def test_where_the_ledger_net_differs_from_the_wallet():
     assert round(REPORT["summary"]["net"] + eth_fee_usdt + dust_value, 8) == -0.07348846
 
 
-@pytest.mark.xfail(strict=True, reason="AUDIT.md finding 2: the coin fee is counted twice and "
-                                       "the kept coin as spent; not fixed until Giannis decides")
 def test_the_ledger_net_is_the_wallet_change():
-    assert round(ledger.summary(live_rows())["net"], 6) == round(-0.07348846, 6)
+    """Finding 2, fixed: the round trip booked again from the same order rows."""
+    rows = [r for r in live_rows() if r["type"] != "round_trip"]
+    rt = ledger.round_trip("ETHUSDT", rows, PERP_OUT["ts_ms"])
+    assert rt["kept_qty"] == pytest.approx(0.00000998, abs=1e-14)
+    assert round(ledger.summary(rows + [rt])["net"], 8) == -0.07348846
 
 
 # --- the account as the snapshot reads it -------------------------------------------------- #
@@ -382,27 +386,44 @@ def test_the_position_was_unreadable_in_every_cycle_it_was_open():
     assert all("2 one-way rows, with a size" in r["snapshot_errors"]["positions:ETHUSDT"]
                for r in blind)
     assert all(not r["alerts"] for r in rt)
-    assert "positions:ETHUSDT" in snapshot_at(T_HOLD).errors       # the replay agrees
+    assert "positions:ETHUSDT" not in snapshot_at(T_HOLD).errors   # the fixed code reads it
 
 
-@pytest.mark.xfail(strict=True, reason="AUDIT.md finding 1: a real row next to the seq -1 "
-                                       "placeholder is read as unreadable; not fixed until "
-                                       "Giannis decides")
 def test_the_hold_snapshot_reads_the_short():
+    """Finding 1, fixed: the placeholder is ignored."""
     p = snapshot_at(T_HOLD).positions["ETHUSDT"]
     assert (p.side, p.size, p.avg_price, p.adl_rank) == ("Sell", 0.01, 2415.77, 2)
 
 
-@pytest.mark.xfail(strict=True, reason="AUDIT.md finding 3: the tiered Earn APR (6.94 % up to "
-                                       "100 USDT) is read as 1.94 %; not fixed until Giannis "
-                                       "decides")
+def test_every_hold_cycle_now_reads_the_short_and_plans_no_alarm():
+    """Every cycle of the hold replayed: the short reads, the plan with the
+    book of the run holds, with no POSITION_UNREADABLE and no exit."""
+    from carry.plan import SymbolBook, plan_cycle
+    from carry_builders import cfg
+    book = {"ETHUSDT": SymbolBook(status="OPEN", entered_ms=STATE["entered_ms"], perp_qty=0.01,
+                                  spot_qty=0.01000998, entry_times=(STATE["entered_ms"],),
+                                  collateral_ratio=0.95)}
+    starts = [r["ts_ms"] for r in RAW if r["path"] == "/v5/market/instruments-info"
+              and r["body"]["result"].get("category") == "linear"
+              and STATE["entered_ms"] + 60_000 < r["ts_ms"] < T_EXIT - 60_000]
+    assert len(starts) >= 50
+    for ts in starts[::10]:
+        snap = snapshot_at(ts)
+        assert snap.positions["ETHUSDT"].size == 0.01, ts
+        plan = plan_cycle(snap, cfg(SYMBOLS=["ETHUSDT"]), "NORMAL", book, "replay")
+        assert not any("POSITION_UNREADABLE" in a for a in plan.alerts), plan.alerts
+        assert not any(a.kind == "EXIT" for a in plan.actions)
+
+
 def test_layer_a_is_the_rate_at_the_staked_amount():
+    """Finding 3, fixed: 27.9414 USDT staked, all in the 6.94 % tier."""
     product = bodies("/v5/earn/product")[0]["body"]["result"]["list"][0]
     assert product["hasTieredApr"] is True and product["estimateApr"] == "1.94%"
     assert product["tierAprDetails"][0] == {"min": "0", "max": "100", "estimateApr": "6.94%"}
     s = snapshot_at(T_HOLD)
     assert s.earn.staked < 100
     assert s.earn.apr == pytest.approx(0.0694)
+    assert s.earn.headline_apr == 0.0194 and s.earn.tiered
 
 
 # --- the run around it --------------------------------------------------------------------- #

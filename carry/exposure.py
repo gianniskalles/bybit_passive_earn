@@ -13,13 +13,15 @@ SYMBOL, no base coin above dust), the paper account (under DRY_RUN the book
 mirrors it, so a paper position counts as a position), and the book (when
 readable). Any read failure is UNKNOWN, which every caller treats as OPEN
 (fail closed). The exchange reads are the production snapshot readers.
+The base coin is compared after the book's dust_qty (ours, under the spot
+minimum: the fee remainder of a round trip, 18/10).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional
 
 from carry import book as book_store
 from carry import snapshot as snapshot_mod
@@ -106,6 +108,9 @@ def check(client, cfg: Mapping, book_path: Path, key: str, paper_path: Optional[
     if errors:
         return Exposure(UNKNOWN, lines + [f"exchange unreadable: {k}: {v}"
                                           for k, v in sorted(errors.items())])
+    dust_book: Dict[str, float] = {}
+    if book_exists and held is not None:
+        dust_book = {s: sb.dust_qty for s, sb in book_store.load(book_path, key)[0].items()}
     seen = False
     for sym in snap.symbols:
         p = snap.positions[sym]
@@ -115,9 +120,11 @@ def check(client, cfg: Mapping, book_path: Path, key: str, paper_path: Optional[
         coin = sym[:-len("USDT")]
         bal = snap.account.balance(coin).wallet
         dust = snap.markets[sym].spot.min_qty
-        if bal > dust:
+        own = dust_book.get(sym, 0.0)
+        if bal - own > dust:
             seen = True
-            lines.append(f"exchange {coin}: wallet {bal} (> dust {dust})")
+            lines.append(f"exchange {coin}: wallet {bal}" + (f" - book dust {own}" if own else "")
+                         + f" (> dust {dust})")
     if not seen:
         lines.append("exchange: no perp position and no base coin above dust")
     return Exposure(OPEN if open_ or seen else FLAT, lines)

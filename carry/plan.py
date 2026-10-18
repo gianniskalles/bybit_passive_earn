@@ -13,7 +13,12 @@ Per symbol, in this order:
      (UNTRACKED_POSITION); a long perp is never ours and is closed; an orphan
      leg (spot without short = liquidation/ADL, or short without spot) is
      closed in this cycle (ORPHAN_LEG); a short smaller than we left it is ADL
-     (ADL_DETECTED) and the excess spot is sold (R13, R14).
+     (ADL_DETECTED) and the excess spot is sold (R13, R14). A position that
+     cannot be read while the book is OPEN is CRITICAL POSITION_UNREADABLE
+     every cycle; after UNREADABLE_EXIT_CYCLES in a row the book's legs are
+     closed (spot, then perp reduceOnly) — 17-18/10 the position was blind
+     for the whole hold. The book's dust_qty (the remainder of the coin fee)
+     is ours: FOREIGN_BALANCE is only what lies beyond book + dust.
   2. Risk exits, allowed in every state and inside the settlement window:
      UNWIND (spot, then perp reduceOnly), MMR >= MMR_EMERGENCY (perp first),
      symbol not Trading (R28), spot coin no longer active collateral (R12).
@@ -54,6 +59,10 @@ from carry.preflight import spot_fee, tradable_symbols
 from carry.snapshot import EARN_FAIL, EARN_SUCCESS, Snapshot
 
 TRIM_FRACTION = 0.5
+# A position that cannot be read while the book is OPEN: CRITICAL every
+# cycle, and after this many cycles in a row a controlled exit on the
+# book's quantities (spot sell, perp reduceOnly).
+UNREADABLE_EXIT_CYCLES = 6
 ENTRY_PRICE_SLACK = 0.005          # USDT kept above the spot cost for price moves
 EARN_RETURN_MIN_USD = 1.0
 DAY_MS = 86_400_000
@@ -73,6 +82,12 @@ class SymbolBook:
     pending_spot: Tuple[str, ...] = ()           # "Buy:<link>"/"Sell:<link>" of unknown fate
     entry_times: Tuple[int, ...] = ()            # for MAX_ROUND_TRIPS_PER_30D
     collateral_ratio: Optional[float] = None     # last seen (R16)
+    # Base coin of ours below the spot minimum, kept across FLAT: the
+    # remainder of the coin-denominated buy fee (17-18/10: 0.00000998 ETH).
+    # The next entry buys that much less; its exit sells it with the rest.
+    dust_qty: float = 0.0
+    # Cycles in a row the position could not be read while OPEN.
+    unreadable_cycles: int = 0
 
 
 @dataclass(frozen=True)
@@ -106,6 +121,10 @@ def _dec(x) -> Decimal:
 def _diff(a: float, b: float) -> float:
     """a - b without binary rounding (0.03 - 0.01 is 0.02, not 0.019999)."""
     return float(_dec(a) - _dec(b))
+
+
+def _add(a: float, b: float) -> float:
+    return float(_dec(a) + _dec(b))
 
 
 def _floor_to(x: float, step: float) -> float:
@@ -207,6 +226,29 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
         wallet_spot = acct.balance(base).wallet if acct else None
         dust = m.spot.min_qty if m else 0.0
 
+        # ---- 0. a position that cannot be read --------------------------------------
+        unread = f"positions:{sym}" in snap.errors
+        if sb.status == OPEN:
+            n = sb.unreadable_cycles + 1 if unread else 0
+            if n != sb.unreadable_cycles:
+                sb = replace(sb, unreadable_cycles=n)
+                updates[sym] = sb
+        if sb.status == OPEN and unread:
+            exit_now = sb.unreadable_cycles >= UNREADABLE_EXIT_CYCLES
+            alerts.append(f"CRITICAL: POSITION_UNREADABLE: {sym} book OPEN (short {sb.perp_qty}, "
+                          f"spot {sb.spot_qty}), position unreadable {sb.unreadable_cycles}/"
+                          f"{UNREADABLE_EXIT_CYCLES} cycles"
+                          + ("; controlled exit on the book's quantities" if exit_now else "")
+                          + f": {snap.errors[f'positions:{sym}']}"[:400])
+            no_entry[sym] = no_entry.get(sym, ()) + ("position unreadable",)
+            if exit_now:
+                held_now = sb.spot_qty if wallet_spot is None else min(wallet_spot, sb.spot_qty)
+                actions.append(Action("EXIT", sym, f"position unreadable "
+                                      f"{sb.unreadable_cycles} cycles in a row",
+                                      legs=("spot", "perp"), perp_qty=sb.perp_qty or None,
+                                      spot_qty=held_now or None))
+                continue
+
         if acct is not None and base in acct.collateral:
             ratio = acct.collateral[base].ratio
             if sb.collateral_ratio and ratio < sb.collateral_ratio * (1 - cfg["CVR_DROP_ALERT"]):
@@ -259,9 +301,10 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
         # anything beyond book + dust is foreign: never traded, no entry.
         held = sb.spot_qty if sb.status == OPEN else 0.0
         spot = None if wallet_spot is None else min(wallet_spot, held)
-        if wallet_spot is not None and _diff(wallet_spot, held) > dust:
-            alerts.append(f"FOREIGN_BALANCE: {sym} {_diff(wallet_spot, held)} {base} beyond the "
-                          f"book ({held}); not traded, no entry")
+        if wallet_spot is not None and _diff(wallet_spot, held + sb.dust_qty) > dust:
+            alerts.append(f"FOREIGN_BALANCE: {sym} {_diff(wallet_spot, held + sb.dust_qty)} "
+                          f"{base} beyond the book ({held} + dust {sb.dust_qty}); not traded, "
+                          f"no entry")
             no_entry[sym] = no_entry.get(sym, ()) + ("foreign balance",)
         known = short_qty is not None and spot is not None
         if sb.status == OPEN and known:
@@ -275,7 +318,8 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
                 continue
             if short_qty == 0:
                 updates[sym] = SymbolBook(entry_times=sb.entry_times,
-                                          collateral_ratio=sb.collateral_ratio)
+                                          collateral_ratio=sb.collateral_ratio,
+                                          dust_qty=_add(sb.dust_qty, spot))
                 sb, in_pos = updates[sym], False
 
         # ---- 2. risk exits ------------------------------------------------------------
@@ -353,7 +397,8 @@ def plan_cycle(snap: Snapshot, cfg: Mapping, risk_state: str, book: Mapping[str,
             why_not.append(f"unresolved spot orders {list(sb.pending_spot)}")
         no_entry[sym] = tuple(why_not)
         wants = d.action == "ENTER" and not why_not
-        size = _entry_size(usable, cfg, spot_fee(snap, sym, cfg)) if wants else None
+        own_dust = sb.dust_qty if wallet_spot is None else min(sb.dust_qty, wallet_spot)
+        size = _entry_size(usable, cfg, spot_fee(snap, sym, cfg), own_dust) if wants else None
         if size is not None:
             perp_qty, spot_qty, cost = size
             room = float(cfg["TOTAL_CAPITAL_CAP_USD"]) - buffer - open_notional
@@ -440,9 +485,11 @@ def _required(cost: float, open_notional: float, buffer: float, slack: bool = Tr
                                                                  else 0.0)
 
 
-def _entry_size(m, cfg: Mapping, fee: float) -> Optional[Tuple[float, float, float]]:
+def _entry_size(m, cfg: Mapping, fee: float, dust: float = 0.0
+                ) -> Optional[Tuple[float, float, float]]:
     """(perp_qty, spot_buy_qty, spot_cost_usdt) within the symbol's notional
-    limit, or None when not even the minimum fits."""
+    limit, or None when not even the minimum fits. The book's dust (ours,
+    already in the wallet) is bought that much less."""
     from carry.preflight import min_position
     limit = notional_cap(cfg, m.symbol)
     ask = m.spot_ask
@@ -451,7 +498,8 @@ def _entry_size(m, cfg: Mapping, fee: float) -> Optional[Tuple[float, float, flo
     if perp_qty < mp.perp_qty:
         return None
     for _ in range(1000):
-        spot_qty = _ceil_to(perp_qty / (1 - fee), m.spot.qty_step)
+        spot_qty = max(_ceil_to(max(_diff(perp_qty, dust), 0.0) / (1 - fee), m.spot.qty_step),
+                       m.spot.min_qty)
         cost = spot_qty * ask
         if cost <= limit:
             return perp_qty, spot_qty, cost
@@ -470,7 +518,8 @@ def _redeem_step(sym, sb: SymbolBook, d: Optional[Decision], can_enter: bool, no
     timeout = float(cfg["REDEEM_TIMEOUT_HOURS"]) * 3_600_000
 
     def abandon(reason):
-        updates[sym] = SymbolBook(entry_times=sb.entry_times, collateral_ratio=sb.collateral_ratio)
+        updates[sym] = SymbolBook(entry_times=sb.entry_times, collateral_ratio=sb.collateral_ratio,
+                                  dust_qty=sb.dust_qty)
         return False
 
     if st == EARN_FAIL:

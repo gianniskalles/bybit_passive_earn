@@ -5,8 +5,9 @@ two READING errors, not account ones. Locked on its exact output
 1. position/list returned two ETHUSDT rows, both positionIdx 0 and size "0"
    (one a placeholder with seq -1 and empty fields), on an account confirmed
    One-Way. Hedge mode = a row with positionIdx 1 or 2, not several rows.
-   positionIdx 0 rows all of size 0 -> FLAT; several rows with a size ->
-   unreadable, as before.
+   The placeholder is always ignored (audit of 18/10: next to an open short
+   it made the position unreadable for the whole hold); several real rows
+   with a size -> unreadable, as before.
 2. accountMMRate empty, all USDT in Earn, dust in the UTA (USDT 0.00008,
    TAC 0.075; the app shows "Margin Balance: --"). Empty accountMMRate AND
    empty totalMaintenanceMargin AND totalOrderIM 0 on every coin AND no open
@@ -94,10 +95,30 @@ def test_a_hedge_row_is_still_unreadable(idx):
         sn.read_position(Rows(rows), "ETHUSDT")
 
 
-def test_several_one_way_rows_with_a_size_are_unreadable():
+def test_a_real_row_next_to_the_placeholder_is_read_as_that_row():
+    """The hold of 17-18/10: the short and the seq -1 placeholder (audit,
+    finding 1). The placeholder is always ignored."""
+    rows = copy.deepcopy(ROWS)
+    rows[0].update(size="0.01", side="Sell", avgPrice="2418.62", adlRankIndicator=2)
+    p = sn.read_position(Rows(rows), "ETHUSDT")
+    assert (p.side, p.size, p.avg_price, p.adl_rank) == ("Sell", 0.01, 2418.62, 2)
+
+
+def test_several_real_rows_with_a_size_are_unreadable():
     rows = copy.deepcopy(ROWS)
     rows[0].update(size="0.01", side="Sell", avgPrice="2418.62")
+    rows[1].update(size="0.02", side="Sell", avgPrice="2418.00", seq=411933266362)
     with pytest.raises(sn.Unreadable, match="2 one-way rows, with a size"):
+        sn.read_position(Rows(rows), "ETHUSDT")
+
+
+@pytest.mark.parametrize("change", [{"seq": 5}, {"avgPrice": "2418.62"}, {"size": "0.01"}])
+def test_only_the_exact_placeholder_is_ignored(change):
+    """seq -1 AND size 0 AND no avgPrice; anything else is a real row."""
+    rows = copy.deepcopy(ROWS)
+    rows[0].update(size="0.01", side="Sell", avgPrice="2418.62")
+    rows[1].update(change, side="Sell" if "size" in change else "")
+    with pytest.raises(sn.Unreadable, match="with a size"):
         sn.read_position(Rows(rows), "ETHUSDT")
 
 

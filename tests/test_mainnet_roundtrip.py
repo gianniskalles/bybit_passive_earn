@@ -486,3 +486,38 @@ def test_no_entry_ends_flat_with_its_own_exit_code(sim):
     assert run.report["result"] == "no entry (FLAT)"
     assert any("basis" in w for w in run.entry.get("last_no_entry", ()))
     assert sim.venue.s.shorts.get("ETHUSDT", 0) == 0
+
+
+# =========================================================================== #
+# the second supervised round trip (after the audit of 18/10)                  #
+# =========================================================================== #
+
+def test_the_second_round_trip_takes_the_first_ones_dust_and_verifies(sim):
+    """0.00000998 ETH left by the first round trip: into the book as dust
+    before the entry, bought that much less, sold with the rest; the report
+    says the position was read in every cycle and the ledger's net is the
+    wallet's change (but for the Earn interest the paper account pays)."""
+    sim.venue.s.coins["ETH"] = 0.00000998
+    run = sim.runner()
+    assert run.checks() == []
+    assert run.run() == 0, run.report
+    v = run.report["verify"]
+    assert v["dust_adopted"] == 0.00000998 and v["dust_before"] == 0.00000998
+    assert v["position_unreadable_cycles"] == 0
+    assert v["earn"]["apr"] == pytest.approx(0.0173)
+    rows = ledger.read(sim.log_dir)
+    buy = [r for r in rows if r["type"] == "order" and r["leg"] == "spot" and r["side"] == "Buy"]
+    assert len(buy) == 1 and float(buy[0]["qty"]) == pytest.approx(0.01001)     # not 0.01002
+    assert _book().dust_qty == v["dust_after"] == pytest.approx(sim.venue.s.coins["ETH"])
+    assert v["dust_after"] < 0.00001
+    assert abs(v["ledger_minus_wallet"]) < 0.002, v
+
+
+@pytest.mark.parametrize("eth,book", [(0.0007, SymbolBook()),                   # not dust
+                                      (0.00000998, SymbolBook(dust_qty=0.00000998)),
+                                      (0.0, SymbolBook())])
+def test_dust_is_adopted_only_under_the_minimum_into_a_book_without_dust(sim, eth, book):
+    sim.venue.s.coins["ETH"] = eth
+    book_store.save(settings.carry_book_file(), KEY, {"ETHUSDT": book}, T0)
+    assert sim.runner().adopt_dust() is None
+    assert _book() == book

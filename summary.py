@@ -89,6 +89,16 @@ def funding_line(sym: str, f: Dict, status: Optional[str]) -> str:
             f"({pct(f['entry_min_expected_apr'])} πάνω από το Earn {pct(layer_a)})")
 
 
+def earn_line(e: Dict) -> str:
+    """The real Earn APR on the amount staked (tiers: 17/10 the first 100
+    USDT paid 6,94 % while Bybit's headline said 1,94 %)."""
+    line = f"Earn: {pct(e['apr'])} στα {e.get('staked', 0):.2f} USDT"
+    if e.get("tiered"):
+        line += f" (κλιμακωτό APR· το βασικό {pct(e['headline_apr'])})" \
+            if e.get("headline_apr") is not None else " (κλιμακωτό APR)"
+    return line
+
+
 def build_carry_summary(log_dir: Path, state_file: Path, hold_file: Path, hmac_key: str,
                         now_ms: Optional[int] = None, hours: int = 24) -> str:
     from carry import ledger
@@ -116,7 +126,11 @@ def build_carry_summary(log_dir: Path, state_file: Path, hold_file: Path, hmac_k
         lines.append(funding_line(sym, f, (book.get(sym) or {}).get("status")))
     for sym, b in sorted(book.items()):
         lines.append(f"{sym}: {b.get('status')}  perp {b.get('perp_qty')}  spot {b.get('spot_qty')}")
-    s = ledger.summary(ledger.read(log_dir, since_ms=since, until_ms=now))
+    earn = last.get("earn")
+    if earn and earn.get("apr") is not None:
+        lines.append(earn_line(earn))
+    s = ledger.summary(ledger.read(ledger.home(log_dir, bool(last.get("dry_run"))),
+                                   since_ms=since, until_ms=now))
     lines.append(f"ledger: funding {s['funding']:+.4f}, Earn interest {s['earn_interest']:+.4f}, "
                  f"fees {s['fees']:.4f}, net {s['net']:+.4f} USDT; orders {s['orders']}, "
                  f"max slippage {s['slippage_bps_max']:.1f} bps")

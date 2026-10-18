@@ -382,8 +382,8 @@ tests `tests/test_carry_mainnet_roundtrip_20261017.py`, κλειδωμένα σ�
 - ✔ Funding: transaction log `type` SETTLEMENT, `change` > 0 = είσπραξη.
 - ✔ R22: η χρέωση spot αγοράς κόβεται στο base coin (`cumFeeDetail {"ETH": ...}`)· η πώληση σε USDT.
 - ✔ Earn orders/positions (Flexible Savings): `Redeem`/`Stake`, `Success`.
-- ✖ `position/list` με ανοιχτή θέση: πραγματική γραμμή + placeholder seq −1 → διαβάζεται unreadable (εύρημα 1, ανοιχτό).
-- ✖ Earn APR με tiers (`hasTieredApr`): διαβάζεται το `estimateApr` αντί του tier (εύρημα 3, ανοιχτό).
+- ✔ `position/list` με ανοιχτή θέση: πραγματική γραμμή + placeholder seq −1· το placeholder αγνοείται (εύρημα 1, διορθώθηκε 18/10).
+- ✔ Earn APR με tiers (`hasTieredApr`, `tierAprDetails`): το APR των tiers στο ποσό (εύρημα 3, διορθώθηκε 18/10).
 - — Δεν εμφανίστηκαν (ανεπαλήθευτα): retCodes 110017/110072, σφάλμα περιοχής (R1), execution types ADL/ρευστοποίησης.
 
 ---
@@ -538,4 +538,26 @@ tests `tests/test_carry_mainnet_roundtrip_20261017.py`, κλειδωμένα σ�
     `--i-approve-real-money`· σκληρό όριο 50 USDT notional (`validate(...,
     roundtrip=True)`, όχι κλειδί config)· σταματά μόνο του· οι timers του carry
     σταματούν όσο τρέχει· το `DRY_RUN` του `carry.yaml` δεν αλλάζει.
+21. **18/10 — διορθώσεις του audit** (`calibration/mainnet_roundtrip_20261017/AUDIT.md`),
+    όπως τις ενέκρινε ο Giannis:
+    - **Ανοιχτή θέση.** Η κενή γραμμή της Bybit (seq −1, size 0, κενό `avgPrice`)
+      αγνοείται πάντα· μία πραγματική γραμμή + κενή = αναγνώσιμη. Μη αναγνώσιμη
+      θέση με book OPEN → `CRITICAL: POSITION_UNREADABLE` στο Telegram αμέσως
+      (δικό της κανάλι, χωρίς το φίλτρο των 2 κύκλων). Μετά από 6 συνεχόμενους
+      κύκλους (`UNREADABLE_EXIT_CYCLES`) → ελεγχόμενη έξοδος με τις ποσότητες
+      του book (πώληση spot, perp reduceOnly), σε κάθε risk state.
+    - **Ledger.** Η χρέωση σε νόμισμα μετράει μόνο στο `fees`· το νόμισμα που
+      μένει (υπόλειμμα) αποτιμάται στην τελευταία τιμή spot, δεν μετράει ως
+      χαμένο (`round_trip.kept_qty/kept_value`).
+    - **Κλιμακωτό APR.** Το στρώμα A είναι το APR των tiers πάνω στο πραγματικό
+      ποσό στο Earn· το κατώφλι εισόδου υπολογίζεται πάνω σε αυτό, και η
+      ημερήσια σύνοψη δείχνει «Earn: X% στα Y USDT». Tiers που δεν διαβάζονται
+      = Earn unreadable = καμία είσοδος.
+    - **Υπόλειμμα.** Το υπόλειμμα της χρέωσης σε νόμισμα είναι `dust_qty` του
+      book: η επόμενη είσοδος αγοράζει τόσο λιγότερο, η έξοδός της το πουλά μαζί
+      με τα υπόλοιπα. `FOREIGN_BALANCE` μόνο πέρα από book + υπόλειμμα· το ίδιο
+      και στον έλεγχο έκθεσης.
+    - **Paper και live χωριστά.** Book `carry_paper_book.json` και ledger
+      `<LOG_DIR>/paper/ledger/` για το DRY_RUN· οι παλιές γραμμές paper
+      (`earn_interest`) φεύγουν από το live ledger αυτόματα (`LEDGER_SPLIT`).
 
