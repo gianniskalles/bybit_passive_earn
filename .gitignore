@@ -22,4 +22,5 @@ __pycache__/
 # Logs & generated output
 logs/
 *.jsonl
+!calibration/**/*.jsonl
 state/

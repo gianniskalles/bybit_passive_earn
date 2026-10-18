@@ -373,6 +373,19 @@ DEADMAN_URL: null                # εξωτερικός έλεγχος ζωής 
 - Αν το BYUSDT υπάρχει ως υπόλοιπο UTA στο API και αν υπάρχει endpoint για mint/redeem.
 - Ποιο σφάλμα επιστρέφει το API όταν απαγορεύεται νέα θέση για λόγους περιοχής (R1).
 
+**Κατάσταση μετά τον επιβλεπόμενο κύκλο mainnet 17–18/10** (`calibration/mainnet_roundtrip_20261017/AUDIT.md`,
+tests `tests/test_carry_mainnet_roundtrip_20261017.py`, κλειδωμένα στις πραγματικές απαντήσεις):
+
+- ✔ `tickers`, `instruments-info`, `fee-rate` (ίσο με τις πραγματικές χρεώσεις: perp 0,055%, spot 0,1%),
+  `account/info` (`marginMode` ISOLATED_MARGIN / REGULAR_MARGIN), collateral info (`collateralSwitch`, `collateralRatio`).
+- ✔ `wallet-balance`: κενό `accountMMRate` μόνο σε ISOLATED_MARGIN· σε REGULAR_MARGIN `"0"` ή τιμή.
+- ✔ Funding: transaction log `type` SETTLEMENT, `change` > 0 = είσπραξη.
+- ✔ R22: η χρέωση spot αγοράς κόβεται στο base coin (`cumFeeDetail {"ETH": ...}`)· η πώληση σε USDT.
+- ✔ Earn orders/positions (Flexible Savings): `Redeem`/`Stake`, `Success`.
+- ✖ `position/list` με ανοιχτή θέση: πραγματική γραμμή + placeholder seq −1 → διαβάζεται unreadable (εύρημα 1, ανοιχτό).
+- ✖ Earn APR με tiers (`hasTieredApr`): διαβάζεται το `estimateApr` αντί του tier (εύρημα 3, ανοιχτό).
+- — Δεν εμφανίστηκαν (ανεπαλήθευτα): retCodes 110017/110072, σφάλμα περιοχής (R1), execution types ADL/ρευστοποίησης.
+
 ---
 
 ## 13. Αποφάσεις του Giannis, 27 Σεπτεμβρίου 2026 — υπερισχύουν όπου συγκρούονται
