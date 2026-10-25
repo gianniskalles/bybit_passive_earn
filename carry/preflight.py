@@ -7,7 +7,7 @@ The minimum neutral position of a symbol, from instruments-info:
         perp_qty / (1 - spot fee) rounded UP to basePrecision, and must meet
         the spot minOrderQty and minOrderAmt
 The capital it needs is the spot buy at the ask. A symbol whose minimum does
-not fit its notional limit (MAX_NOTIONAL_PER_SYMBOL_USD, or
+not fit its notional limit (MAX_NOTIONAL_BY_SYMBOL / MAX_NOTIONAL_PER_SYMBOL_USD, or
 MAX_NOTIONAL_PER_ALT_USD for an altcoin) is left out of the cycle with a
 SYMBOL_BELOW_MIN_SIZE alert. So is a symbol whose market is unreadable, stale
 or not Trading on both legs (no new exposure; exits never consult this).

@@ -1,11 +1,12 @@
 """Decision 24 (25/10): the capital goes to ~200 USDT, BTCUSDT joins ETHUSDT.
 
 1. The shipped config: SYMBOLS [ETHUSDT, BTCUSDT], TOTAL_CAPITAL_CAP_USD 200,
-   MAX_NOTIONAL_PER_SYMBOL_USD 90 (from the preflight's minimum positions),
-   USDT_BUFFER_USD 20 (10 %). The BTC minimum (perp 0.001, spot 0.001002
-   after the 0.1 % fee) at the real 30/9 price (85,310.8) is ~85.5 USDT and
-   fits 90 up to a spot price of ~89,800; ETH's (~24) fits easily; both
-   together with the buffer fit 200.
+   a limit per symbol (MAX_NOTIONAL_BY_SYMBOL: BTC 130, ETH 50), USDT_BUFFER_USD
+   20 (10 %): 130 + 50 + 20 = 200. The BTC minimum (perp 0.001, spot 0.001002
+   after the 0.1 % fee) is ~85.5 USDT at the real 30/9 price (85,310.8) and
+   fits 130 up to a spot price of ~129,700 (+52 %); the ETH minimum (perp
+   0.01, spot 0.01002) fits 50 up to ~4,990 (+106 % on 17/10's 2,417). (A
+   single limit of 90 left BTC 5 % of room: refused by Giannis, 25/10.)
 2. New USDT in the UTA (a manual transfer from Funding) goes to Earn by
    itself (EARN_RETURN), the buffer kept while a position is open; the book
    and the ledger's PnL are untouched.
@@ -55,23 +56,27 @@ def acct(usdt=0.0, coins=None, btc_collateral=True):
 
 def test_the_shipped_config_is_decision_24():
     assert SHIPPED["SYMBOLS"] == ["ETHUSDT", "BTCUSDT"]
-    assert (SHIPPED["TOTAL_CAPITAL_CAP_USD"], SHIPPED["MAX_NOTIONAL_PER_SYMBOL_USD"],
-            SHIPPED["USDT_BUFFER_USD"]) == (200, 90, 20)
+    assert (SHIPPED["TOTAL_CAPITAL_CAP_USD"], SHIPPED["USDT_BUFFER_USD"]) == (200, 20)
+    assert SHIPPED["MAX_NOTIONAL_BY_SYMBOL"] == {"BTCUSDT": 130, "ETHUSDT": 50}
+    assert (cc.notional_cap(SHIPPED, "BTCUSDT"), cc.notional_cap(SHIPPED, "ETHUSDT")) == (130, 50)
     assert SHIPPED["USDT_BUFFER_USD"] >= 0.10 * SHIPPED["TOTAL_CAPITAL_CAP_USD"]
-    assert 2 * 90 + 20 <= 200
+    assert 130 + 50 + 20 == 200
     assert cc.validate(SHIPPED, testnet=False,
                        alt_report=cc.read_alt_report(cc.ALT_REPORT_FILE)) == []
     assert SHIPPED["DRY_RUN"] is True and SHIPPED["DEADMAN_URL"] is None
 
 
-def test_the_btc_minimum_fits_the_limit_at_the_real_price():
-    m = both()["BTCUSDT"]
-    assert (m.perp.min_qty, m.perp.qty_step, m.spot.qty_step) == (0.001, 0.001, 0.000001)
+@pytest.mark.parametrize("sym,perp,spot,limit,top,now", [
+    ("BTCUSDT", 0.001, 0.001002, 130, 129_740, BTC_30_9),
+    ("ETHUSDT", 0.01, 0.01002, 50, 4_990, ETH_17_10),
+])
+def test_each_minimum_fits_its_limit_with_room(sym, perp, spot, limit, top, now):
+    m = both()[sym]
     mp = pf.min_position(m, spot_fee=0.001)
-    assert (mp.perp_qty, mp.spot_buy_qty) == (0.001, 0.001002)
-    assert mp.notional_usd == pytest.approx(0.001002 * (BTC_30_9 + 0.01))
-    assert 85 < mp.notional_usd <= 90
-    assert 90 / mp.spot_buy_qty == pytest.approx(89_820, abs=1)   # where it stops fitting
+    assert (mp.perp_qty, mp.spot_buy_qty) == (perp, spot)
+    assert mp.notional_usd <= cc.notional_cap(SHIPPED, sym) == limit
+    assert limit / mp.spot_buy_qty == pytest.approx(top, abs=1)    # where it stops fitting
+    assert top / now > 1.5                                        # >= 50 % of room
 
 
 def test_both_minimums_and_the_buffer_fit_the_cap():
@@ -82,10 +87,12 @@ def test_both_minimums_and_the_buffer_fit_the_cap():
     assert total + SHIPPED["USDT_BUFFER_USD"] <= SHIPPED["TOTAL_CAPITAL_CAP_USD"]
 
 
-def test_above_89_800_btc_is_left_out_with_an_alert():
+def test_above_its_price_a_symbol_is_left_out_with_an_alert():
     snap = snapshot(markets=both(btc=90_000.0), acct=acct(usdt=200.0))
+    assert pf.tradable_symbols(snap, SHIPPED) == (["ETHUSDT", "BTCUSDT"], [])   # 90k fits now
+    snap = snapshot(markets=both(btc=130_000.0, eth=5_000.0), acct=acct(usdt=200.0))
     fit, alerts = pf.tradable_symbols(snap, SHIPPED)
-    assert fit == ["ETHUSDT"] and alerts[0].startswith("SYMBOL_BELOW_MIN_SIZE: BTCUSDT")
+    assert fit == [] and [a.split(":")[1].split()[0] for a in alerts] == ["ETHUSDT", "BTCUSDT"]
 
 
 def test_both_enter_within_the_cap():
@@ -96,9 +103,10 @@ def test_both_enter_within_the_cap():
     plan = plan_cycle(snap, SHIPPED, "NORMAL", {}, "c")
     enters = [a for a in plan.actions if a.kind == "ENTER"]
     assert [a.symbol for a in enters] == ["ETHUSDT", "BTCUSDT"], (plan.decisions, plan.no_entry)
-    assert all(a.usdt <= 90 for a in enters)
-    assert sum(a.usdt for a in enters) + 20 <= 200
-    assert enters[1].perp_qty == 0.001
+    eth, btc = enters
+    assert eth.usdt <= 50 and btc.usdt <= 130
+    assert (eth.perp_qty, btc.perp_qty) == (0.02, 0.001)       # 0.03 ETH > 50; 0.002 BTC > 130
+    assert eth.usdt + btc.usdt + 20 <= 200
 
 
 # --- 2. new USDT in the UTA ----------------------------------------------------------- #
@@ -196,7 +204,7 @@ def test_live_refuses_btc_collateral_off(isolated_paths):
 
 
 def test_live_refuses_a_btc_minimum_beyond_the_limit(isolated_paths):
-    problems = _ops(_flat(prices={"btc": 95_000.0})).problems(200.0)
+    problems = _ops(_flat(prices={"btc": 135_000.0})).problems(200.0)
     assert any(p.startswith("SYMBOL_BELOW_MIN_SIZE: BTCUSDT") for p in problems)
 
 
@@ -222,14 +230,17 @@ def _take(snap):
 def test_preflight_carry_symbols_ok(preflight_mod, capsys):
     assert preflight_mod.cmd_carry_symbols([], take=_take(_flat())) == 0
     out = capsys.readouterr().out
-    assert "BTCUSDT: minimum perp 0.001 / spot 0.001002" in out and "fits up to a spot price of 89,8" in out
+    assert "BTCUSDT: minimum perp 0.001 / spot 0.001002" in out
+    assert "limit 130 (fits; fits up to a spot price of 129,741)" in out
+    assert "ETHUSDT: minimum perp 0.01 / spot 0.01002" in out
+    assert "limit 50 (fits; fits up to a spot price of 4,990)" in out
     assert "BTC collateral: active" in out and "ETH collateral: active" in out
     assert out.strip().endswith("OK")
 
 
 @pytest.mark.parametrize("snap,why", [
     (lambda: _flat(acct=acct(btc_collateral=False)), "BTC collateral: NOT ACTIVE"),
-    (lambda: _flat(prices={"btc": 95_000.0}), "DOES NOT FIT"),
+    (lambda: _flat(prices={"btc": 135_000.0}), "DOES NOT FIT"),
 ])
 def test_preflight_carry_symbols_fails(preflight_mod, capsys, snap, why):
     assert preflight_mod.cmd_carry_symbols([], take=_take(snap())) == 1
@@ -241,3 +252,34 @@ def test_preflight_carry_symbols_needs_the_carry_key(preflight_mod, capsys):
     settings.env_file().write_text("")
     assert preflight_mod.cmd_carry_symbols([], take=_take(_flat())) == 1
     assert "collateral cannot be read" in capsys.readouterr().out
+
+
+# --- the per-symbol limit -------------------------------------------------------------- #
+
+@pytest.mark.parametrize("value", [{"SOLUSDT": 30}, {"BTCUSDT": 0}, {"BTCUSDT": "130"}, [130]])
+def test_a_bad_per_symbol_limit_is_refused(value):
+    errors = cc.validate(dict(SHIPPED, MAX_NOTIONAL_BY_SYMBOL=value), testnet=False)
+    assert any(e.startswith("MAX_NOTIONAL_BY_SYMBOL") for e in errors), errors
+
+
+def test_the_per_symbol_limits_must_fit_the_cap():
+    errors = cc.validate(dict(SHIPPED, MAX_NOTIONAL_BY_SYMBOL={"BTCUSDT": 140, "ETHUSDT": 50}),
+                         testnet=False)
+    assert any("add up to 190" in e for e in errors), errors
+
+
+def test_a_core_symbol_not_listed_takes_the_common_limit():
+    cfg = dict(SHIPPED, MAX_NOTIONAL_BY_SYMBOL={"BTCUSDT": 130})
+    assert (cc.notional_cap(cfg, "BTCUSDT"), cc.notional_cap(cfg, "ETHUSDT")) == (130, 50)
+    assert cc.notional_cap(dict(SHIPPED, MAX_NOTIONAL_BY_SYMBOL=None), "BTCUSDT") == 50
+
+
+def test_the_round_trip_keeps_its_single_50_usdt_limit():
+    sys.path.insert(0, str(REPO / "scripts"))
+    import mainnet_roundtrip as rt
+    cfg = rt.roundtrip_cfg(SHIPPED, notional=30.0)
+    assert "MAX_NOTIONAL_BY_SYMBOL" not in cfg and cc.notional_cap(cfg, "ETHUSDT") == 30.0
+    assert cc.validate(cfg, testnet=False, roundtrip=True) == []
+    errors = cc.validate(dict(cfg, MAX_NOTIONAL_BY_SYMBOL={"ETHUSDT": 500}), testnet=False,
+                         roundtrip=True)
+    assert any(e.startswith("ROUNDTRIP: MAX_NOTIONAL_BY_SYMBOL") for e in errors)

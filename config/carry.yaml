@@ -42,13 +42,14 @@ MAX_SPREAD_BPS: 1                      # ceil(p99 spread), BTC/ETH
 # limits of all SYMBOLS add up to <= cap - buffer. The cycle also leaves out
 # (with an alert) any symbol whose minimum position (instruments-info) does
 # not fit its limit — carry/preflight.py.
-# Decision 24: ~200 USDT. Two symbols: 2 x 90 + 20 = 200. The limit is the
-# preflight's: the BTC minimum (perp 0.001, spot 0.001002 after the fee) is
-# ~85.5 USDT at 85,300 (30/9) and fits 90 up to a spot price of ~89,800;
-# the ETH minimum (~25-27 USDT) fits easily. `preflight carry-symbols` reads
-# it again with today's prices before going live.
+# Decision 24: ~200 USDT, a limit per symbol: BTC 130 + ETH 50 + buffer 20
+# = 200. The BTC minimum (perp 0.001, spot 0.001002 after the fee) fits 130
+# up to a spot price of ~129,700 (85,300 on 30/9: +52 %); the ETH minimum
+# (perp 0.01, spot 0.01002) fits 50 up to ~4,990 (2,417 on 17/10: +106 %).
+# `preflight carry-symbols` reads both again with today's prices.
 TOTAL_CAPITAL_CAP_USD: 200
-MAX_NOTIONAL_PER_SYMBOL_USD: 90
+MAX_NOTIONAL_BY_SYMBOL: {BTCUSDT: 130, ETHUSDT: 50}
+MAX_NOTIONAL_PER_SYMBOL_USD: 50        # a core symbol not listed above (none now)
 USDT_BUFFER_USD: 20                    # 10 % of the cap; stays in the UTA while a position is open (13.3)
 # Decision 13.10: an altcoin in SYMBOLS needs its own GO
 # (calibration/carry_alt_calibration.json, same thresholds as above) and this

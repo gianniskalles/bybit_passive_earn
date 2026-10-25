@@ -47,7 +47,7 @@ def paths(isolated_paths, monkeypatch, tmp_path):
 # bot and the tier arithmetic are tested on it; the shipped 200 USDT config
 # has tests of its own (test_carry_capital_200.py).
 ETH100 = dict(SYMBOLS=["ETHUSDT"], TOTAL_CAPITAL_CAP_USD=100, MAX_NOTIONAL_PER_SYMBOL_USD=80,
-              USDT_BUFFER_USD=15)
+              USDT_BUFFER_USD=15, MAX_NOTIONAL_BY_SYMBOL={})
 
 
 def carry_yaml():

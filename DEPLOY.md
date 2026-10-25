@@ -567,12 +567,17 @@ sudo -u hermes env HOME=/opt/hermes $PY $REPO/scripts/carry_live.py status
 **Το config** (στο PR, merge τη μέρα των χρημάτων):
 - `SYMBOLS: [ETHUSDT, BTCUSDT]`·
 - `TOTAL_CAPITAL_CAP_USD: 200`·
-- `MAX_NOTIONAL_PER_SYMBOL_USD: 90`·
+- `MAX_NOTIONAL_BY_SYMBOL: {BTCUSDT: 130, ETHUSDT: 50}`·
 - `USDT_BUFFER_USD: 20` (10%).
 
-**Πώς βγαίνει το όριο 90:** η ελάχιστη θέση BTC (perp 0,001, spot 0,001002)
-είναι ~85,5 USDT στα 85.300 και χωρά στο 90 ως τα **~89.800** USDT/BTC. Η ETH
-(~25) χωρά άνετα. Δύο σύμβολα: 2 × 90 + 20 = 200.
+Σύνολο: 130 + 50 + 20 = 200.
+
+**Γιατί χωριστά όρια:** ένα κοινό όριο 90 άφηνε στο BTC μόνο 5% περιθώριο.
+
+| Σύμβολο | Ελάχιστη θέση | Όριο | Χωρά ως | Περιθώριο |
+|---|---|---|---|---|
+| BTC | 0,001 perp / 0,001002 spot, ~85,5 USDT στα 85.300 | 130 | ~129.700 USDT/BTC | +52% |
+| ETH | 0,01 perp / 0,01002 spot | 50 | ~4.990 USDT/ETH | +106% από τα 2.417 |
 
 **Η σειρά μετράει:**
 - **Το deploy.sh αρνείται όσο υπάρχει ο διακόπτης.**
@@ -593,16 +598,16 @@ sudo -u hermes env HOME=/opt/hermes $PY $REPO/scripts/carry_live.py status
 | 4 | Giannis | Merge του PR (ή ο Claude, όταν του το πεις). |
 | 5 | Hermes | `cd $REPO && sudo -u hermes git pull --ff-only origin main` και `sudo $REPO/deploy/deploy.sh --system carry` → «ALL 7 STEPS PASSED». |
 | 6 | Giannis | Bybit UI (subaccount carry): Assets → Collateral → **BTC On** (το ETH είναι ήδη On). |
-| 7 | Hermes | `sudo -u hermes env HOME=/opt/hermes $PY $REPO/deploy/preflight.py carry-symbols` → `OK`: το BTC και το ETH χωράνε στο όριο με τις σημερινές τιμές, και το BTC και το ETH είναι collateral `active`. Με `FAIL` σταματάμε. |
+| 7 | Hermes | `sudo -u hermes env HOME=/opt/hermes $PY $REPO/deploy/preflight.py carry-symbols` → `OK`. Για κάθε σύμβολο δείχνει την ελάχιστη θέση, το όριό του (BTC 130, ETH 50) και την τιμή όπου παύει να χωρά. Το BTC και το ETH πρέπει να είναι collateral `active`. Με `FAIL` σταματάμε. |
 | 8 | Giannis | `/live enable 200` → «All checks pass» → `/confirm <κωδικός> LIVE 200 USDT` → «🟢 CARRY LIVE». |
 | 9 | Giannis | Bybit: μεταφορά των νέων USDT **Funding → Unified Trading** του subaccount. Ο επόμενος κύκλος live τα βάζει μόνος του στο Earn (`EARN_RETURN`). Αν υπάρχει ανοιχτή θέση, κρατά τα 20 του buffer. |
 | 10 | Hermes | `/live` → `LIVE ... capital cap 200 USDT`. Μετά από έναν κύκλο: το `journalctl -u yield-carry-cycle` δείχνει `EARN_RETURN`, και η ημερήσια σύνοψη «Earn: X% στα Y USDT». |
 
-**Αν στο βήμα 7 το BTC «DOES NOT FIT»** (BTC πάνω από ~89.800): το BTC μένει
-εκτός. Ο κύκλος το αφήνει έξω με `SYMBOL_BELOW_MIN_SIZE`, και το enable
-αρνείται. Τότε είτε μένουμε μόνο σε ETH (το config του PR χωρίς BTC), είτε
-βάζουμε χωριστό όριο ανά σύμβολο (π.χ. BTC 130 / ETH 50). Αυτό θέλει μικρή
-αλλαγή του schema.
+**Αν στο βήμα 7 ένα σύμβολο «DOES NOT FIT»** (BTC πάνω από ~129.700 ή ETH πάνω
+από ~4.990): ο κύκλος το αφήνει έξω με `SYMBOL_BELOW_MIN_SIZE`, και το enable
+αρνείται. Το `carry-symbols` δείχνει για κάθε σύμβολο την τιμή στην οποία
+παύει να χωρά. Η διόρθωση είναι να αλλάξουν τα δύο όρια στο
+`MAX_NOTIONAL_BY_SYMBOL`, με το ίδιο σύνολο 180.
 
 **Νέα USDT στο UTA (επιβεβαιωμένο με tests):**
 - **Πότε μπαίνουν στο Earn:** όλα, σε κάθε κύκλο live χωρίς άλλη ενέργεια·

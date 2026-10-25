@@ -110,7 +110,11 @@ SCHEMA: Dict[str, Tuple[Callable[[Any], bool], str]] = {
 }
 OPTIONAL = {"TESTNET_ONLY": (lambda v: isinstance(v, bool), "boolean"),
             # required as soon as SYMBOLS holds an altcoin (13.10)
-            "MAX_NOTIONAL_PER_ALT_USD": (lambda v: v is None or _pos(v), "number > 0")}
+            "MAX_NOTIONAL_PER_ALT_USD": (lambda v: v is None or _pos(v), "number > 0"),
+            # decision 24: a limit of its own for a core symbol (BTC 130, ETH 50)
+            "MAX_NOTIONAL_BY_SYMBOL": (lambda v: v is None or (
+                isinstance(v, dict) and all(k in CORE_SYMBOLS and _pos(x) for k, x in v.items())),
+                "a mapping {BTCUSDT|ETHUSDT: number > 0}")}
 
 # Floors a production (non-TESTNET_ONLY) config may never go below.
 PRODUCTION_FLOORS: Dict[str, Tuple[Callable[[Any], bool], str]] = {
@@ -127,9 +131,12 @@ def alts(cfg: Dict) -> List[str]:
 
 
 def notional_cap(cfg: Dict, symbol: str) -> float:
-    """The per-symbol notional limit: altcoins have their own, smaller one."""
+    """The per-symbol notional limit: MAX_NOTIONAL_BY_SYMBOL for a core
+    symbol listed there (decision 24), else MAX_NOTIONAL_PER_SYMBOL_USD;
+    altcoins have their own, smaller one."""
     if symbol in CORE_SYMBOLS:
-        return cfg["MAX_NOTIONAL_PER_SYMBOL_USD"]
+        own = cfg.get("MAX_NOTIONAL_BY_SYMBOL") or {}
+        return own[symbol] if symbol in own else cfg["MAX_NOTIONAL_PER_SYMBOL_USD"]
     return cfg["MAX_NOTIONAL_PER_ALT_USD"]
 
 
@@ -212,7 +219,7 @@ def validate(cfg: Any, testnet: bool, alt_report: Optional[Dict] = None,
             cfg["USDT_BUFFER_USD"] < BUFFER_SHARE * cfg["TOTAL_CAPITAL_CAP_USD"]:
         errors.append(f"USDT_BUFFER_USD: must be >= {BUFFER_SHARE:.0%} of TOTAL_CAPITAL_CAP_USD")
     elif ok("MAX_NOTIONAL_PER_SYMBOL_USD", "TOTAL_CAPITAL_CAP_USD", "USDT_BUFFER_USD", "SYMBOLS") \
-            and not alt_errors:
+            and not alt_errors and "MAX_NOTIONAL_BY_SYMBOL" not in bad:
         total = sum(notional_cap(cfg, s) for s in cfg["SYMBOLS"])
         room = cfg["TOTAL_CAPITAL_CAP_USD"] - cfg["USDT_BUFFER_USD"]
         if total > room:
@@ -239,6 +246,9 @@ def _roundtrip_errors(cfg: Dict, testnet: bool) -> List[str]:
         errors.append("ROUNDTRIP: SYMBOLS must be exactly [ETHUSDT]")
     if cfg.get("DRY_RUN") is not False:
         errors.append("ROUNDTRIP: DRY_RUN must be false in the round trip's in-memory config")
+    if cfg.get("MAX_NOTIONAL_BY_SYMBOL"):
+        errors.append("ROUNDTRIP: MAX_NOTIONAL_BY_SYMBOL must be empty (the 50 USDT limit is "
+                      "MAX_NOTIONAL_PER_SYMBOL_USD)")
     for key in ("MAX_NOTIONAL_PER_SYMBOL_USD", "TOTAL_CAPITAL_CAP_USD"):
         v = cfg.get(key)
         if not _pos(v) or v > ROUNDTRIP_MAX_NOTIONAL_USD:

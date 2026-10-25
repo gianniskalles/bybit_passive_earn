@@ -160,7 +160,8 @@ def complete(**over):
     cfg = dict(SHIPPED)
     cfg.update(MAX_ENTRY_BASIS_BPS=10, MAX_SPREAD_BPS=5, TOTAL_CAPITAL_CAP_USD=1000,
                MAX_NOTIONAL_PER_SYMBOL_USD=450, USDT_BUFFER_USD=100,
-               DEADMAN_URL="https://hc-ping.com/abc")
+               DEADMAN_URL="https://hc-ping.com/abc",
+               MAX_NOTIONAL_BY_SYMBOL={})          # the single limit; decision 24's has its tests
     cfg.update(over)
     return cfg
 

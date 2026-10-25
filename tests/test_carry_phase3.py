@@ -17,7 +17,8 @@ def cfg(**over):
     on which this file's arithmetic is written; decision 24 (200 USDT, BTC)
     has its own tests (test_carry_capital_200.py)."""
     return _shipped_cfg(**{**dict(SYMBOLS=["ETHUSDT"], TOTAL_CAPITAL_CAP_USD=100,
-                                  MAX_NOTIONAL_PER_SYMBOL_USD=80, USDT_BUFFER_USD=15), **over})
+                                  MAX_NOTIONAL_PER_SYMBOL_USD=80, USDT_BUFFER_USD=15,
+                                  MAX_NOTIONAL_BY_SYMBOL={}), **over})
 
 
 def kinds(plan, symbol=None):

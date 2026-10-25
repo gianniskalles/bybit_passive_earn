@@ -30,7 +30,8 @@ def complete(**over):
     cfg = yaml.safe_load(SHIPPED.read_text())
     cfg.update(MAX_ENTRY_BASIS_BPS=10, MAX_SPREAD_BPS=5, TOTAL_CAPITAL_CAP_USD=1000,
                MAX_NOTIONAL_PER_SYMBOL_USD=450, USDT_BUFFER_USD=100,
-               DEADMAN_URL="https://hc-ping.com/abc")
+               DEADMAN_URL="https://hc-ping.com/abc",
+               MAX_NOTIONAL_BY_SYMBOL={})          # the single limit; decision 24's has its tests
     cfg.update(over)
     return cfg
 
@@ -139,11 +140,12 @@ def test_real_180_days_one_entry_per_symbol():
 
 
 def test_shipped_capital_is_decision_24():
-    """25/10: ~200 USDT, ETH and BTC (decision 13.11 had ETH, 100 / 15 / 80)."""
+    """25/10: ~200 USDT, ETH 50 and BTC 130 (decision 13.11 had ETH, 100 / 15 / 80)."""
     cfg = yaml.safe_load(SHIPPED.read_text())
     assert cfg["SYMBOLS"] == ["ETHUSDT", "BTCUSDT"]
     assert (cfg["TOTAL_CAPITAL_CAP_USD"], cfg["USDT_BUFFER_USD"], cfg["MAX_NOTIONAL_PER_SYMBOL_USD"],
-            cfg["MAX_NOTIONAL_PER_ALT_USD"]) == (200, 20, 90, 30)
+            cfg["MAX_NOTIONAL_PER_ALT_USD"]) == (200, 20, 50, 30)
+    assert cfg["MAX_NOTIONAL_BY_SYMBOL"] == {"BTCUSDT": 130, "ETHUSDT": 50}
 
 
 def test_capital_rules():

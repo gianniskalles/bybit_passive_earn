@@ -129,6 +129,7 @@ def roundtrip_cfg(base: Dict, notional: float) -> Dict:
                USDT_BUFFER_USD=BUFFER_USD, MAX_NOTIONAL_PER_SYMBOL_USD=round(notional, 2),
                CALIBRATION_SOURCE="supervised mainnet round trip — NOT a calibration")
     cfg.pop("TESTNET_ONLY", None)
+    cfg.pop("MAX_NOTIONAL_BY_SYMBOL", None)          # one limit: the round trip's
     return cfg
 
 
