@@ -138,11 +138,12 @@ def test_real_180_days_one_entry_per_symbol():
         assert res.worst_30d_return >= -0.005, sym
 
 
-def test_shipped_capital_is_decision_13_11():
+def test_shipped_capital_is_decision_24():
+    """25/10: ~200 USDT, ETH and BTC (decision 13.11 had ETH, 100 / 15 / 80)."""
     cfg = yaml.safe_load(SHIPPED.read_text())
-    assert cfg["SYMBOLS"] == ["ETHUSDT"]
+    assert cfg["SYMBOLS"] == ["ETHUSDT", "BTCUSDT"]
     assert (cfg["TOTAL_CAPITAL_CAP_USD"], cfg["USDT_BUFFER_USD"], cfg["MAX_NOTIONAL_PER_SYMBOL_USD"],
-            cfg["MAX_NOTIONAL_PER_ALT_USD"]) == (100, 15, 80, 30)
+            cfg["MAX_NOTIONAL_PER_ALT_USD"]) == (200, 20, 90, 30)
 
 
 def test_capital_rules():

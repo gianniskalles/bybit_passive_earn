@@ -588,4 +588,20 @@ tests `tests/test_carry_mainnet_roundtrip_20261017.py`, κλειδωμένα σ�
     - **Στρώμα A της εισόδου:** το APR του πάνω κομματιού του υπολοίπου που
       αποσύρει η είσοδος (Earn + αδρανή USDT, έως το όριο θέσης και το
       διαθέσιμο κεφάλαιο), όχι ο μέσος όρος (`plan.layer_a_apr`).
+24. **25/10 — ~200 USDT, ETH και BTC** (merge τη μέρα των χρημάτων).
+    - **Config:** `SYMBOLS: [ETHUSDT, BTCUSDT]`, `TOTAL_CAPITAL_CAP_USD: 200`,
+      `MAX_NOTIONAL_PER_SYMBOL_USD: 90`, `USDT_BUFFER_USD: 20` (10%).
+    - **Το όριο:** από την ελάχιστη θέση του preflight. Το BTC (~85,5 USDT
+      στα 85.300) χωρά ως ~89.800 USDT/BTC.
+    - **`preflight carry-symbols`:** ελάχιστη θέση έναντι ορίου ανά σύμβολο,
+      η τιμή όπου παύει να χωρά, και κάθε νόμισμα ενεργό collateral.
+    - **Live:** οι έλεγχοι ελέγχουν επίσης ότι κάθε σύμβολο χωρά.
+    - **Config πέρα από τον διακόπτη** (σύμβολο που δεν υπέγραψε ο Giannis, ή
+      όρια που δεν χωράνε στο υπογεγραμμένο κεφάλαιο, π.χ. μετά από `git pull`
+      χωρίς τη σειρά): live `NO_NEW_POSITIONS`, CRITICAL. Ποτέ
+      CONFIG_INCOMPLETE με θέση.
+    - **Νέα USDT στο UTA:** πάνε μόνα τους στο Earn (εκτός από το buffer όσο
+      υπάρχει θέση). Το book και το PnL του ledger δεν αλλάζουν.
+    - **Σειρά όσο είμαστε live:** unwind → disable → resume → deploy →
+      carry-symbols → enable 200 → μεταφορά των USDT (DEPLOY.md).
 

@@ -8,8 +8,16 @@ import pytest
 
 from carry import plan as cp
 from carry.plan import SymbolBook
-from carry_builders import (MIN, NOW, account, cfg, earn, foreign_order, market, redeem_order,
+from carry_builders import (MIN, NOW, account, cfg as _shipped_cfg, earn, foreign_order, market, redeem_order,
                             short, snapshot)
+
+
+def cfg(**over):
+    """The plan's rules on the shape of decision 13.11 (ETH, 100 / 80 / 15),
+    on which this file's arithmetic is written; decision 24 (200 USDT, BTC)
+    has its own tests (test_carry_capital_200.py)."""
+    return _shipped_cfg(**{**dict(SYMBOLS=["ETHUSDT"], TOTAL_CAPITAL_CAP_USD=100,
+                                  MAX_NOTIONAL_PER_SYMBOL_USD=80, USDT_BUFFER_USD=15), **over})
 
 
 def kinds(plan, symbol=None):

@@ -14,7 +14,8 @@ effective(cfg, env, ...) is what every carry cycle runs with:
   - a config that is not DRY_RUN: true (the supervised round trip's
     in-memory config, the testnet config) is returned as it is.
   - a valid switch: DRY_RUN false, and TOTAL_CAPITAL_CAP_USD no higher than
-    the cap Giannis signed.
+    the cap Giannis signed. A config beyond the switch (a symbol it does not
+    list, limits its cap cannot hold) runs NO_NEW_POSITIONS, CRITICAL.
   - no valid switch (absent, unsigned, tampered) and the LIVE book holds
     nothing: paper, as before (a broken switch is CRITICAL).
   - no valid switch while the LIVE book holds a position: live, UNWIND only
@@ -74,6 +75,39 @@ def live_book_holds(book) -> List[str]:
             if sb.status != FLAT or sb.perp_qty > 0 or sb.spot_qty > 0 or sb.pending_spot]
 
 
+def _within_switch(out: Dict, body: Dict, alerts: List[str]):
+    """The live config inside what Giannis signed. The cycle reads
+    config/carry.yaml every run, so a `git pull` alone (deploy refuses while
+    live) can change it under the switch:
+      - a symbol the switch does not list (BTC added while live on ETH);
+      - limits the signed cap cannot hold (2 x 90 + 20 against a cap of 100,
+        which would fail validation and stop every cycle, position or not).
+    Either: NO_NEW_POSITIONS (exits, trims and Earn still run) and CRITICAL
+    until the sequence /unwind carry -> /live disable -> deploy -> /live enable
+    <cap>. Otherwise the cap is the signed one when lower."""
+    from carry import config as cc
+    signed = body["capital_cap"]
+    why = []
+    extra = [s for s in out.get("SYMBOLS") or [] if s not in (body.get("symbols") or [])]
+    if extra:
+        why.append(f"symbols {extra} not in the live switch {body.get('symbols')}")
+    cap = out.get("TOTAL_CAPITAL_CAP_USD")
+    if isinstance(cap, (int, float)) and not isinstance(cap, bool) and cap > signed:
+        clamped = dict(out, TOTAL_CAPITAL_CAP_USD=signed)
+        broken = [e for e in cc.validate(clamped, testnet=False)
+                  if e.startswith(("USDT_BUFFER_USD", "MAX_NOTIONAL_PER_SYMBOL_USD"))]
+        if broken:
+            why.append(f"the config's limits need TOTAL_CAPITAL_CAP_USD {cap}, the switch "
+                       f"signed {signed:g} ({broken[0]})")
+        else:
+            out = clamped
+    if why:
+        alerts.append("CRITICAL: LIVE_CONFIG_BEYOND_SWITCH: " + "; ".join(why) + ". No new "
+                      "positions: /unwind carry, /live disable, deploy, /live enable <cap>")
+        return out, alerts, "NO_NEW_POSITIONS", body
+    return out, alerts, None, body
+
+
 def effective(cfg: Mapping, env: Mapping[str, str], switch_file: Path, live_book_file: Path,
               key: str) -> Tuple[Dict, List[str], Optional[str], Optional[Dict]]:
     """(config to run, alerts, forced risk state or None, the switch or None)."""
@@ -86,10 +120,7 @@ def effective(cfg: Mapping, env: Mapping[str, str], switch_file: Path, live_book
     alerts: List[str] = []
     if body is not None:
         out["DRY_RUN"] = False
-        cap = out.get("TOTAL_CAPITAL_CAP_USD")
-        if isinstance(cap, (int, float)) and not isinstance(cap, bool):
-            out["TOTAL_CAPITAL_CAP_USD"] = min(cap, body["capital_cap"])
-        return out, alerts, None, body
+        return _within_switch(out, body, alerts)
     if broken:
         alerts.append(f"CRITICAL: LIVE_SWITCH_INVALID: {broken}; never trusted")
     from carry import book as book_store

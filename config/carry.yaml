@@ -2,7 +2,7 @@
 # and checked by carry/config.py; the cycle refuses to start on any problem.
 # DRY_RUN: true = paper trading. Only Giannis sets it to false (§10).
 
-SYMBOLS: [ETHUSDT]                     # decision 13.11 (Δ2: BTC/ETH; alts need their own GO)
+SYMBOLS: [ETHUSDT, BTCUSDT]            # decision 24 (~200 USDT); 13.11 (Δ2: BTC/ETH; alts need their own GO)
 CYCLE_MINUTES: 5
 DRY_RUN: true
 LOG_DIR: /opt/hermes/logs/carry
@@ -42,9 +42,14 @@ MAX_SPREAD_BPS: 1                      # ceil(p99 spread), BTC/ETH
 # limits of all SYMBOLS add up to <= cap - buffer. The cycle also leaves out
 # (with an alert) any symbol whose minimum position (instruments-info) does
 # not fit its limit — carry/preflight.py.
-TOTAL_CAPITAL_CAP_USD: 100
-MAX_NOTIONAL_PER_SYMBOL_USD: 80
-USDT_BUFFER_USD: 15                    # stays in the UTA while a position is open (13.3)
+# Decision 24: ~200 USDT. Two symbols: 2 x 90 + 20 = 200. The limit is the
+# preflight's: the BTC minimum (perp 0.001, spot 0.001002 after the fee) is
+# ~85.5 USDT at 85,300 (30/9) and fits 90 up to a spot price of ~89,800;
+# the ETH minimum (~25-27 USDT) fits easily. `preflight carry-symbols` reads
+# it again with today's prices before going live.
+TOTAL_CAPITAL_CAP_USD: 200
+MAX_NOTIONAL_PER_SYMBOL_USD: 90
+USDT_BUFFER_USD: 20                    # 10 % of the cap; stays in the UTA while a position is open (13.3)
 # Decision 13.10: an altcoin in SYMBOLS needs its own GO
 # (calibration/carry_alt_calibration.json, same thresholds as above) and this
 # limit, which must be below MAX_NOTIONAL_PER_SYMBOL_USD. Unused while SYMBOLS

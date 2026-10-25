@@ -239,7 +239,7 @@ def _cycle(cfg, env, client, config_error, now, cycle_id, rec, alerts, snapshot_
         state = stricter(state, force_state)            # never laxer than the signed state
         rec["forced_state"] = force_state
     if live_force:
-        state = stricter(state, live_force)             # live without a switch: UNWIND only
+        state = stricter(state, live_force)             # carry/live.py: never laxer
         rec["forced_state"] = stricter(rec.get("forced_state", "NORMAL"), live_force)
     rec["risk_state"] = state
 
