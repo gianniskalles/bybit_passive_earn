@@ -43,6 +43,13 @@ def paths(isolated_paths, monkeypatch, tmp_path):
     return {"switch": settings.carry_live_file(), "book": settings.carry_book_file()}
 
 
+# The shape before decision 24 (ETH only, 100 USDT): the switch, the CLI, the
+# bot and the tier arithmetic are tested on it; the shipped 200 USDT config
+# has tests of its own (test_carry_capital_200.py).
+ETH100 = dict(SYMBOLS=["ETHUSDT"], TOTAL_CAPITAL_CAP_USD=100, MAX_NOTIONAL_PER_SYMBOL_USD=80,
+              USDT_BUFFER_USD=15, MAX_NOTIONAL_BY_SYMBOL={})
+
+
 def carry_yaml():
     return yaml.safe_load((REPO / "config" / "carry.yaml").read_text())
 
@@ -77,19 +84,20 @@ def test_no_switch_is_paper(paths):
 
 
 def test_a_valid_switch_is_live_with_the_signed_cap(paths):
-    live.write(paths["switch"], KEY, 60.0, ["ETHUSDT"], "giannis", NOW)
-    out, alerts, force, switch = live.effective(carry_yaml(), {"DEADMAN_URL": DEADMAN},
+    live.write(paths["switch"], KEY, 95.0, ["ETHUSDT"], "giannis", NOW)
+    out, alerts, force, switch = live.effective(dict(carry_yaml(), **ETH100),
+                                                {"DEADMAN_URL": DEADMAN},
                                                 paths["switch"], paths["book"], KEY)
-    assert out["DRY_RUN"] is False and out["TOTAL_CAPITAL_CAP_USD"] == 60.0
+    assert out["DRY_RUN"] is False and out["TOTAL_CAPITAL_CAP_USD"] == 95.0
     assert alerts == [] and force is None and switch["by"] == "giannis"
 
 
 def test_the_signed_cap_is_never_raised_by_the_repo(paths):
-    live.write(paths["switch"], KEY, 60.0, ["ETHUSDT"], "giannis", NOW)
-    out = live.effective(dict(carry_yaml(), TOTAL_CAPITAL_CAP_USD=500), {}, paths["switch"],
+    live.write(paths["switch"], KEY, 95.0, ["ETHUSDT"], "giannis", NOW)
+    out = live.effective(dict(carry_yaml(), **dict(ETH100, TOTAL_CAPITAL_CAP_USD=500)), {}, paths["switch"],
                          paths["book"], KEY)[0]
-    assert out["TOTAL_CAPITAL_CAP_USD"] == 60.0
-    low = live.effective(dict(carry_yaml(), TOTAL_CAPITAL_CAP_USD=40), {}, paths["switch"],
+    assert out["TOTAL_CAPITAL_CAP_USD"] == 95.0
+    low = live.effective(dict(carry_yaml(), **dict(ETH100, TOTAL_CAPITAL_CAP_USD=40)), {}, paths["switch"],
                          paths["book"], KEY)[0]
     assert low["TOTAL_CAPITAL_CAP_USD"] == 40
 
@@ -120,6 +128,31 @@ def test_a_live_position_without_a_valid_switch_runs_live_unwind_only(paths, swi
                                                 paths["book"], KEY)
     assert out["DRY_RUN"] is False and force == "UNWIND" and switch is None
     assert any(a.startswith("CRITICAL: LIVE_WITHOUT_SWITCH:") for a in alerts)
+
+
+@pytest.mark.parametrize("signed_cap,signed_symbols,why", [
+    (100.0, ["ETHUSDT", "BTCUSDT"], "the config's limits need TOTAL_CAPITAL_CAP_USD 200"),
+    (200.0, ["ETHUSDT"], "symbols ['BTCUSDT'] not in the live switch"),
+])
+def test_a_config_beyond_the_switch_opens_nothing(paths, signed_cap, signed_symbols, why):
+    """A `git pull` alone changes the config under a live switch (deploy
+    refuses while live): never CONFIG_INCOMPLETE with a position to manage,
+    never a symbol or a size Giannis did not sign — NO_NEW_POSITIONS."""
+    assert carry_yaml()["SYMBOLS"] == ["ETHUSDT", "BTCUSDT"]
+    live.write(paths["switch"], KEY, signed_cap, signed_symbols, "giannis", NOW)
+    out, alerts, force, switch = live.effective(carry_yaml(), {"DEADMAN_URL": DEADMAN},
+                                                paths["switch"], paths["book"], KEY)
+    assert out["DRY_RUN"] is False and force == "NO_NEW_POSITIONS" and switch is not None
+    [a] = alerts
+    assert a.startswith("CRITICAL: LIVE_CONFIG_BEYOND_SWITCH:") and why in a
+    assert cc.validate(out, testnet=False) == []                    # the cycle still runs
+
+
+def test_a_config_within_the_switch_runs_as_signed(paths):
+    live.write(paths["switch"], KEY, 200.0, ["ETHUSDT", "BTCUSDT"], "giannis", NOW)
+    out, alerts, force, _ = live.effective(carry_yaml(), {"DEADMAN_URL": DEADMAN},
+                                           paths["switch"], paths["book"], KEY)
+    assert (alerts, force, out["TOTAL_CAPITAL_CAP_USD"]) == ([], None, 200)
 
 
 def test_the_round_trip_config_is_left_alone(paths):
@@ -168,13 +201,14 @@ def test_the_cycle_runs_live_only_with_the_switch_and_pings_the_env_deadman(
                             exchange=sim.venue, opener=ping, sleep=sim.sleep)
     assert rc == 0 and rec["dry_run"] is True and "live_switch" not in rec, rec["alerts"]
     assert ping.urls == [DEADMAN]
-    live.write(settings.carry_live_file(), KEY, 100.0, ["ETHUSDT"], "giannis", sim.clock_ms)
+    live.write(settings.carry_live_file(), KEY, 200.0, cfg["SYMBOLS"], "giannis", sim.clock_ms)
     sim.clock_ms += 300_000
     sim.renew()
     rec, rc = rcc.run_cycle(cfg, env, sim.client, now_ms=sim.clock_ms, snapshot_fn=sim.snapshot,
                             exchange=sim.venue, opener=ping, sleep=sim.sleep)
     assert rc == 0 and rec["dry_run"] is False, rec["alerts"]
-    assert rec["live_switch"]["capital_cap"] == 100.0 and ping.urls == [DEADMAN, DEADMAN]
+    assert rec["risk_state"] == "NORMAL" and "forced_state" not in rec
+    assert rec["live_switch"]["capital_cap"] == 200.0 and ping.urls == [DEADMAN, DEADMAN]
     # and without the .env's DEADMAN_URL a live cycle does nothing at all
     rec, rc = rcc.run_cycle(cfg, {"HERMES_RISK_HMAC_KEY": KEY}, sim.client,
                             now_ms=sim.clock_ms + 300_000, snapshot_fn=sim.snapshot,
@@ -248,7 +282,7 @@ def cli(answers=None, tty=True, snap=flat_snap, tg=None, env=None, cfg=None, cli
         a = answers.pop(0)
         return tg.code() if a == "<code>" else a
 
-    c = carry_live.LiveCli(cfg or base_cfg(DEADMAN_URL=None), env, client, tg, ask=ask,
+    c = carry_live.LiveCli(cfg or base_cfg(DEADMAN_URL=None, **ETH100), env, client, tg, ask=ask,
                            isatty=lambda: tty, now_ms=lambda: NOW, clock=lambda: 0.0,
                            snapshot_fn=snap, roundtrip_active=lambda: roundtrip,
                            out=out.append)
@@ -289,8 +323,8 @@ def test_enable_refuses_without_a_terminal(ready):
     ({"env": {"HERMES_RISK_HMAC_KEY": KEY, "BYBIT_CARRY_API_KEY": "k",
               "BYBIT_CARRY_API_SECRET": "s"}}, "DEADMAN_URL (https://...) not set"),
     ({"env": {"HERMES_RISK_HMAC_KEY": KEY, "DEADMAN_URL": DEADMAN}}, "BYBIT_CARRY_API_KEY"),
-    ({"cfg": base_cfg(DEADMAN_URL="https://in.the/repo")}, "must stay null in the repo"),
-    ({"cfg": base_cfg(DRY_RUN=False, DEADMAN_URL=None)}, "DRY_RUN must stay true"),
+    ({"cfg": base_cfg(DEADMAN_URL="https://in.the/repo", **ETH100)}, "must stay null in the repo"),
+    ({"cfg": base_cfg(DRY_RUN=False, DEADMAN_URL=None, **ETH100)}, "DRY_RUN must stay true"),
     ({"snap": open_snap}, "not FLAT"),
     ({"roundtrip": True}, "round trip"),
     ({"tg": Tg(ok=True)}, None),
@@ -385,7 +419,7 @@ def test_the_entry_hurdle_on_either_side_of_100():
     decisions = {}
     for staked in (57.17, 100.0, 150.0):
         snap = snapshot(markets={"ETHUSDT": m}, earn_=tiered(staked), acct=account(usdt=0.0))
-        d = plan_cycle(snap, base_cfg(SYMBOLS=["ETHUSDT"]), "NORMAL", {}, "c").decisions["ETHUSDT"]
+        d = plan_cycle(snap, base_cfg(**ETH100), "NORMAL", {}, "c").decisions["ETHUSDT"]
         decisions[staked] = d
     assert decisions[57.17].action == decisions[100.0].action == "STAY_OUT"
     assert "MIN_HOLD income" in decisions[100.0].reason
@@ -403,7 +437,7 @@ def test_the_entry_hurdle_on_either_side_of_100():
 ])
 def test_layer_a_is_the_marginal_rate_of_the_entry(staked, idle, room, apr):
     from carry.plan import layer_a_apr
-    cfg = base_cfg(SYMBOLS=["ETHUSDT"])
+    cfg = base_cfg(**ETH100)
     assert cfg["MAX_NOTIONAL_PER_SYMBOL_USD"] == 80
     assert layer_a_apr(tiered(staked), cfg, "ETHUSDT", idle, room) == pytest.approx(apr)
 
@@ -417,7 +451,7 @@ def test_a_flat_rate_is_layer_a_as_it_is():
 def test_the_daily_summary_threshold_uses_the_same_rate():
     decisions = {"ETHUSDT": type("D", (), {"expected_apr": 0.12})()}
     snap = snapshot(earn_=tiered(150.0), acct=account(usdt=0.0))
-    f = rcc.funding_view(decisions, snap, base_cfg(SYMBOLS=["ETHUSDT"]))["ETHUSDT"]
+    f = rcc.funding_view(decisions, snap, base_cfg(**ETH100))["ETHUSDT"]
     assert f["layer_a_apr"] == pytest.approx((30 * 0.0694 + 50 * 0.0194) / 80)
     assert f["required_apr"] == pytest.approx(0.05 + f["layer_a_apr"])
 
@@ -427,7 +461,7 @@ def test_returning_to_earn_across_100_is_one_stake():
     (the tiers change nothing in what is returned)."""
     snap = snapshot(acct=account(usdt=29.23), earn_=tiered(95.0),
                     positions={"ETHUSDT": short()})
-    plan = plan_cycle(snap, base_cfg(SYMBOLS=["ETHUSDT"]), "NO_NEW_POSITIONS", {}, "c")
+    plan = plan_cycle(snap, base_cfg(**ETH100), "NO_NEW_POSITIONS", {}, "c")
     [a] = [x for x in plan.actions if x.kind == "EARN_RETURN"]
     assert a.usdt == 29.23
 
@@ -451,7 +485,7 @@ class Clock:
 def bot(env=None, snap=flat_snap, clock=None):
     env = {"HERMES_RISK_HMAC_KEY": KEY, "BYBIT_CARRY_API_KEY": "k", "BYBIT_CARRY_API_SECRET": "s",
            "DEADMAN_URL": DEADMAN} if env is None else env
-    ops = lambda: live_ops.LiveOps(base_cfg(DEADMAN_URL=None), env, object(),  # noqa: E731
+    ops = lambda: live_ops.LiveOps(base_cfg(DEADMAN_URL=None, **ETH100), env, object(),  # noqa: E731
                                    now_ms=lambda: NOW, snapshot_fn=snap,
                                    roundtrip_active=lambda: False)
     return CommandBot(CHAT, lambda s, r: None, lambda: "status", clock=clock or Clock(),

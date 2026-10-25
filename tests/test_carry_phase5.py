@@ -17,7 +17,15 @@ import settings
 from carry import adopt, book as book_store, ledger, risk
 from carry.paper import PaperExchange, PaperState
 from carry.plan import SymbolBook
-from carry_builders import NOW, cfg as base_cfg, market, snapshot
+from carry_builders import NOW, cfg as _shipped_cfg, market, snapshot
+
+
+def base_cfg(**over):
+    """The cycle on the shape of decision 13.11 (ETH, 100 / 80 / 15), on which
+    this file's sizes are written; decision 24 has test_carry_capital_200.py."""
+    return _shipped_cfg(**{**dict(SYMBOLS=["ETHUSDT"], TOTAL_CAPITAL_CAP_USD=100,
+                                  MAX_NOTIONAL_PER_SYMBOL_USD=80, USDT_BUFFER_USD=15,
+                                  MAX_NOTIONAL_BY_SYMBOL={}), **over})
 from carry_regimes import E8, H, FakeClient, Regime
 from helpers import KEY
 

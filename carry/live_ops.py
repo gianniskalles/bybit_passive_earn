@@ -126,11 +126,15 @@ class LiveOps:
             if acct is not None:
                 if not acct.cross_margin:
                     p.append(f"margin mode {acct.margin_mode}: Cross Margin is needed")
-                for sym in snap.symbols:
+                for sym in snap.symbols:                   # every SYMBOL: ETH and BTC
                     base = sym[:-len("USDT")]
                     c = acct.collateral.get(base)
                     if c is None or not c.active:
                         p.append(f"{base} is not active collateral (Bybit UI: Collateral -> On)")
+            # Every SYMBOL's minimum position fits its limit (else the cycle
+            # would leave it out for ever with SYMBOL_BELOW_MIN_SIZE).
+            from carry.preflight import tradable_symbols
+            p.extend(tradable_symbols(snap, self.live_cfg(cap))[1])
         except Exception as e:                                      # noqa: BLE001
             p.append(f"exchange unreadable: {type(e).__name__}: {e}")
         e = self.exposure()

@@ -30,6 +30,10 @@ Secrets are never printed: only sha256 fingerprints (first 12 hex chars).
                           an unreadable carry book is moved aside ONLY while
                           carry-exposure is FLAT; otherwise FAIL (recovery is
                           Telegram /adopt carry, decision 13.15)
+  carry-symbols           read only, before going live (or raising the capital):
+                          every SYMBOL's minimum position against its limit, with
+                          the price at which it would stop fitting, and its coin
+                          active UTA collateral (BTC and ETH); FAIL otherwise
   carry-reset-state-if-invalid / carry-check-cycle / carry-expect-normal
                           the yield rotation's checks, on the carry's own
                           risk state and cycle records
@@ -397,6 +401,64 @@ def cmd_carry_dry_run_on(args: List[str]) -> int:
     return 1
 
 
+def cmd_carry_symbols(args: List[str], take=None) -> int:
+    """Each SYMBOL: minimum position <= limit (carry/preflight.py, the
+    instruments and prices read now) and its coin active collateral. Needs
+    the carry's key (collateral is private)."""
+    from carry import config as cc
+    from carry import preflight as cpf
+    from carry import snapshot as sn
+    take = take or sn.take
+    env = settings.load_env()
+    cfg = _carry_cfg()
+    try:
+        cc.validate(dict(cfg), testnet=False)
+        client = _carry_client(env)
+    except Exception as e:                                       # noqa: BLE001
+        print(f"ERROR: {type(e).__name__}: {e}")
+        return 1
+    if client is None:
+        print(f"ERROR: {CARRY_KEY}/{CARRY_SECRET} not set: collateral cannot be read")
+        return 1
+    try:
+        snap = take(client, cfg, private=True)
+    except Exception as e:                                       # noqa: BLE001
+        print(f"ERROR: exchange unreadable: {type(e).__name__}: {e}")
+        return 1
+    ok = True
+    total = 0.0
+    print(f"capital cap {cfg.get('TOTAL_CAPITAL_CAP_USD')} USDT, buffer "
+          f"{cfg.get('USDT_BUFFER_USD')} USDT, symbols {cfg.get('SYMBOLS')}")
+    for sym in cfg.get("SYMBOLS") or []:
+        m = snap.markets.get(sym)
+        if m is None:
+            print(f"{sym}: market unreadable ({snap.errors.get(f'market:{sym}')})")
+            ok = False
+            continue
+        limit = cc.notional_cap(cfg, sym)
+        mp = cpf.min_position(m, cpf.spot_fee(snap, sym, cfg))
+        total += limit
+        fits = mp.notional_usd <= limit
+        top = limit / mp.spot_buy_qty                       # the spot ask it fits up to
+        print(f"{sym}: minimum perp {mp.perp_qty} / spot {mp.spot_buy_qty} = "
+              f"{mp.notional_usd:.2f} USDT at ask {m.spot_ask} — limit {limit} "
+              f"({'fits' if fits else 'DOES NOT FIT'}; fits up to a spot price of {top:,.0f})")
+        ok = ok and fits
+        base = sym[:-len("USDT")]
+        c = snap.account.collateral.get(base) if snap.account is not None else None
+        if c is None:
+            print(f"  {base} collateral: unreadable ({snap.errors.get('account')})")
+            ok = False
+        else:
+            print(f"  {base} collateral: {'active' if c.active else 'NOT ACTIVE'} "
+                  f"(ratio {c.ratio}; Bybit UI: Collateral -> {base} On)")
+            ok = ok and c.active
+    print(f"limits together {total} USDT <= cap - buffer "
+          f"{(cfg.get('TOTAL_CAPITAL_CAP_USD') or 0) - (cfg.get('USDT_BUFFER_USD') or 0)}")
+    print("OK" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def cmd_carry_exposure(args: List[str]) -> int:
     e = carry_exposure()
     _print_exposure(e)
@@ -496,6 +558,7 @@ COMMANDS = {
     "has-bot-token": cmd_has_bot_token,
     "carry-dry-run-on": cmd_carry_dry_run_on,
     "carry-exposure": cmd_carry_exposure,
+    "carry-symbols": cmd_carry_symbols,
     "carry-reset-book-if-invalid": cmd_carry_reset_book_if_invalid,
     "carry-reset-state-if-invalid": cmd_carry_reset_state_if_invalid,
     "carry-check-cycle": cmd_carry_check_cycle,
